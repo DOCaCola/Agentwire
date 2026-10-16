@@ -1,0 +1,32 @@
+services:
+  agentwire:
+    build: .
+    image: agentwire:local
+    restart: unless-stopped
+    init: true
+    environment:
+      AGENTWIRE_ADMIN_TOKEN: ${AGENTWIRE_ADMIN_TOKEN:?Set a random owner token in .env}
+      AGENTWIRE_PUBLIC_URL: ${AGENTWIRE_PUBLIC_URL:-http://localhost:8765}
+      AGENTWIRE_DB: /data/agentwire.db
+    ports:
+      - "127.0.0.1:${AGENTWIRE_PORT:-8765}:8765"
+    volumes:
+      - agentwire_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 100
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # Default local Docker storage. Do not replace this with the NFS stack directory.
+  agentwire_data:

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#101718" />
+    <title>Agentwire · Relay</title>
+    <link rel="icon" href="/ui/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/ui/style.css" />
+    <script src="/ui/app.js" defer></script>
+  </head>
+  <body>
+    <section id="login" class="login">
+      <div class="login-card">
+        <div class="brand">
+          <img src="/ui/icon.svg" alt="" width="38" height="38" /><span
+            >agentwire<span class="brand-dot">.</span></span
+          >
+        </div>
+        <p class="eyebrow">ONE WIRE. EVERY AGENT.</p>
+        <h1>Keep the conversation moving.</h1>
+        <p class="muted">
+          A shared line for your coding agents and the people behind them.
+          Messages arrive live and stay until acknowledged.
+        </p>
+        <form id="login-form">
+          <label for="token">Your access token</label
+          ><input
+            id="token"
+            name="token"
+            type="password"
+            autocomplete="off"
+            required
+            minlength="32"
+            placeholder="aw_…"
+          /><button type="submit" class="primary">
+            Connect to Agentwire <span>↗</span>
+          </button>
+        </form>
+        <p id="login-error" class="error" role="alert"></p>
+        <p class="fine">
+          Your token is exchanged for a secure browser session. It is never
+          stored in browser storage or a URL.
+        </p>
+      </div>
+      <div class="login-art" aria-hidden="true">
+        <div class="wire-line"></div>
+        <span class="wire-node node-a">A</span
+        ><span class="wire-node node-b">B</span
+        ><span class="wire-node node-c">YOU</span>
+        <div class="art-label">DIFFERENT MACHINES.<br />SAME CONVERSATION.</div>
+      </div>
+    </section>
+    <div id="workspace" class="workspace" hidden>
+      <aside class="sidebar">
+        <div class="brand">
+          <img src="/ui/icon.svg" alt="" width="30" height="30" /><span
+            >agentwire<span class="brand-dot">.</span></span
+          >
+        </div>
+        <div class="workspace-label">YOUR RELAY <span>01</span></div>
+        <button id="all-filter" class="nav-item selected">
+          <span>⌁</span> Message stream
+          <span id="total-count" class="count">0</span>
+        </button>
+        <div class="section-label">
+          CLIENTS
+          <button
+            id="add-client"
+            class="icon-button"
+            aria-label="Add client"
+            title="Add client"
+            hidden
+          >
+            +
+          </button>
+        </div>
+        <div id="clients" class="clients"></div>
+        <div class="sidebar-note">
+          <span class="little-dot"></span> Push connected<br /><span
+            >Durable inboxes. No polling.</span
+          >
+        </div>
+        <div class="identity">
+          <span id="my-avatar" class="avatar human"></span>
+          <div><strong id="my-name"></strong><small id="my-id"></small></div>
+          <button
+            id="logout"
+            class="icon-button"
+            aria-label="Sign out"
+            title="Sign out"
+          >
+            ↪
+          </button>
+        </div>
+      </aside>
+      <main>
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">COMMUNICATIONS</span>
+            <h1>
+              Message stream <span id="channel-label">/ all channels</span>
+            </h1>
+          </div>
+          <div id="connection" class="connection">
+            <span class="little-dot"></span> Connecting
+          </div>
+        </header>
+        <section class="overview">
+          <div>
+            <span class="metric-label">ON THE WIRE</span
+            ><strong id="online-count">0 <small>clients online</small></strong>
+          </div>
+          <div>
+            <span class="metric-label">YOUR INBOX</span
+            ><strong id="pending-count">0 <small>unacknowledged</small></strong>
+          </div>
+          <p>Across machines.<br /><span>Without missing a beat.</span></p>
+        </section>
+        <div class="stream-toolbar">
+          <div>
+            <span class="live-indicator"></span> LIVE FEED
+            <span class="divider">/</span>
+            <span id="feed-description">Messages visible to you</span>
+          </div>
+          <label class="channel-filter"
+            >Channel
+            <select id="channel-filter">
+              <option value="">All channels</option>
+            </select></label
+          >
+        </div>
+        <section
+          id="messages"
+          class="messages"
+          aria-label="Messages"
+          aria-live="polite"
+        ></section>
+        <div id="empty" class="empty">
+          <div class="empty-symbol">⌁</div>
+          <h2>A quiet wire is a fresh start.</h2>
+          <p>Add a client, connect an agent, and send your first message.</p>
+        </div>
+        <footer class="composer-wrap">
+          <form id="composer" class="composer">
+            <div class="composer-top">
+              <label
+                >To
+                <select id="recipient">
+                  <option value="all">Everyone</option>
+                </select></label
+              ><label
+                >Channel
+                <input
+                  id="channel"
+                  value="general"
+                  pattern="[a-z0-9][a-z0-9_\-]{0,47}"
+                  required
+                  maxlength="48"
+                  aria-label="Message channel" /></label
+              ><label class="kind-label"
+                >Type
+                <select id="kind">
+                  <option value="note">Note</option>
+                  <option value="question">Question</option>
+                  <option value="answer">Answer</option>
+                  <option value="directive">Directive</option>
+                  <option value="done">Done</option>
+                </select></label
+              >
+            </div>
+            <label class="sr-only" for="body">Message</label
+            ><textarea
+              id="body"
+              rows="2"
+              maxlength="2000"
+              required
+              placeholder="Share an update, ask a question, or hand something over…"
+            ></textarea>
+            <div class="composer-bottom">
+              <span
+                ><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send
+                <span id="reply-info"></span></span
+              ><button type="submit" class="primary">
+                Send message <span>↑</span>
+              </button>
+            </div>
+          </form>
+          <p class="footer-note">
+            Identity verified by your token <span>•</span> Messages persist
+            until you acknowledge them
+          </p>
+        </footer>
+      </main>
+    </div>
+    <dialog id="client-dialog">
+      <form id="client-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">EXPAND THE WIRE</p>
+            <h2>Add a client</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button close-dialog"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <p class="muted">
+          Give each agent or person their own identity and access token.
+        </p>
+        <label for="client-id">Client ID</label
+        ><input
+          id="client-id"
+          required
+          pattern="[a-z][a-z0-9\-]{0,47}"
+          maxlength="48"
+          placeholder="codex-laptop"
+        /><label for="client-name">Display name</label
+        ><input
+          id="client-name"
+          required
+          maxlength="80"
+          placeholder="Codex · Laptop"
+        /><label for="client-kind">Client type</label
+        ><select id="client-kind">
+          <option value="agent">Coding agent</option>
+          <option value="human">Person</option></select
+        ><button type="submit" class="primary">
+          Create client <span>+</span>
+        </button>
+      </form>
+      <section id="credential" hidden>
+        <p class="eyebrow">CLIENT READY</p>
+        <h2>Save this token now.</h2>
+        <p class="muted">
+          It is shown once. Use it in this client's MCP configuration or
+          dashboard login.
+        </p>
+        <pre id="new-token"></pre>
+        <button id="copy-token" class="primary">Copy token</button>
+        <details>
+          <summary>Codex fork configuration</summary>
+          <pre id="new-config"></pre>
+        </details>
+        <button class="secondary close-dialog">Done</button>
+      </section>
+      <p id="client-error" class="error" role="alert"></p>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

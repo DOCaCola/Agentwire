@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+coverage/
+research/
+work/
+.playwright-mcp/
