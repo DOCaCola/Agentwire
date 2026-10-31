@@ -1,6 +1,6 @@
 {
   "name": "agentwire",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "A durable, push-first message relay for coding agents and humans",
   "type": "module",
@@ -10,21 +10,24 @@
   "files": [
     "dist",
     "public",
-    "README.md"
+    "README.md",
+    "plugins/agentwire"
   ],
   "engines": {
     "node": ">=24.13.0 <27"
   },
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "build": "tsc",
+    "build": "npm run build:server && npm run build:plugin",
     "start": "node dist/main.js",
     "test": "npm run build && tsx --test --test-concurrency=1 tests/*.test.ts",
     "check": "tsc --noEmit",
-    "format": "prettier --write src tests public AGENTS.md README.md *.json *.yaml deploy/*.yaml",
-    "format:check": "prettier --check src tests public AGENTS.md README.md *.json *.yaml deploy/*.yaml",
+    "format": "prettier --write src tests public AGENTS.md README.md *.json *.yaml deploy/*.yaml scripts plugins .agents/plugins/*.json",
+    "format:check": "prettier --check src tests public AGENTS.md README.md *.json *.yaml deploy/*.yaml scripts plugins .agents/plugins/*.json",
     "adapter": "node dist/adapter.js",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "build:server": "tsc",
+    "build:plugin": "node scripts/build-plugin.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
@@ -37,6 +40,7 @@
   "devDependencies": {
     "@types/express": "5.0.6",
     "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
     "prettier": "3.9.10",
     "tsx": "4.23.15",
     "typescript": "7.0.2"

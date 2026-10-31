@@ -19,6 +19,11 @@ unnecessary defensive checks, silent fallbacks, or compatibility shims.
 - OpenID identity is `(issuer, subject)`. Validate state, nonce, PKCE, signed ID
   tokens, and configured groups. Never link by email or trust proxy identity
   headers. Revoking a device or human must revoke all affected agent credentials.
+- Plugin MCP initialization must complete before relay discovery or device approval.
+  Setup returns pairing information and waits over SSE in the background. Keep
+  plugin settings and credentials outside the installation cache.
+- Build the tracked plugin JavaScript bundle from source; it includes dependencies
+  but no runtime. Verify it works without node_modules beside the installed file.
 - The current DOCa fork supports idle wakeup through `channel = true` and the
   stdio Claude channel contract. Its removed `surface_notifications` path is not
   supported. Keep notices compact and coalesced; see README.md.

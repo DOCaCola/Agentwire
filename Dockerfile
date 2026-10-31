@@ -4,7 +4,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
-RUN npm run build && npm prune --omit=dev --ignore-scripts
+RUN npm run build:server && npm prune --omit=dev --ignore-scripts
 
 FROM node:24.14.0-bookworm-slim
 ENV NODE_ENV=production PORT=8765 HOST=0.0.0.0 AGENTWIRE_DB=/data/agentwire.db

@@ -1,0 +1,24 @@
+{
+  "name": "agentwire",
+  "version": "0.4.0",
+  "description": "Connect coding agents across machines with dashboard-approved devices and pushed messages.",
+  "author": { "name": "DOCaCola" },
+  "repository": "https://github.com/DOCaCola/Agentwire",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Agentwire",
+    "shortDescription": "Connect agents across your devices",
+    "longDescription": "Approve a device from your dashboard and exchange directed or broadcast messages between agent chats. Uses the machine's existing Node 24.13–26 installation. Automatic incoming turns require the DOCa Codex fork's channel support.",
+    "developerName": "DOCaCola",
+    "category": "Communication",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Set up Agentwire on this device",
+      "Send an update to another agent"
+    ],
+    "logo": "./assets/icon.svg",
+    "composerIcon": "./assets/icon.svg",
+    "brandColor": "#B4E8C7"
+  }
+}

@@ -111,37 +111,53 @@ export async function deviceRequest(
   }
   return response.json();
 }
+export const enrollmentSchema = z.object({
+  status: z.enum(["pending", "approved"]),
+  user_code: z.string(),
+  verification_url: z.string().url(),
+  expires_at: z.number(),
+});
+export type Enrollment = z.infer<typeof enrollmentSchema>;
+
+export async function requestEnrollment(
+  credential: DeviceCredential,
+  signal: AbortSignal,
+): Promise<Enrollment> {
+  const url = clientUrl(credential.url);
+  return enrollmentSchema.parse(
+    await deviceRequest(
+      url,
+      "api/enrollment",
+      undefined,
+      {
+        name: credential.name,
+        token_hash: createHash("sha256").update(credential.token).digest("hex"),
+      },
+      signal,
+    ),
+  );
+}
+
 export async function enrollDevice(
   credential: DeviceCredential,
   report: (message: string) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const url = clientUrl(credential.url);
-  const enrollment = z
-    .object({
-      status: z.string(),
-      user_code: z.string(),
-      verification_url: z.string().url(),
-      expires_at: z.number(),
-    })
-    .parse(
-      await deviceRequest(
-        url,
-        "api/enrollment",
-        undefined,
-        {
-          name: credential.name,
-          token_hash: createHash("sha256")
-            .update(credential.token)
-            .digest("hex"),
-        },
-        signal,
-      ),
-    );
+  const enrollment = await requestEnrollment(credential, signal);
   if (enrollment.status === "approved") return;
   report(
     `Device: ${credential.name}\nApproval code: ${enrollment.user_code.slice(0, 4)}-${enrollment.user_code.slice(4)}\nDevice fingerprint: ${createHash("sha256").update(credential.token).digest("hex").slice(0, 16)}\n\nOn your own computer or phone, open:\n${enrollment.verification_url}\nSign in there, open Devices, and approve this client using the code above.\nThis client needs no browser or login. Waiting for remote approval…`,
   );
+  await waitForEnrollment(credential, enrollment, signal);
+  report("Device approved.");
+}
+
+export async function waitForEnrollment(
+  credential: DeviceCredential,
+  enrollment: Enrollment,
+  signal: AbortSignal,
+): Promise<void> {
+  const url = clientUrl(credential.url);
   await new Promise<void>((resolve, reject) => {
     const stream = new EventSource(new URL("api/enrollment/events", url), {
       fetch: async (input, init) => {
@@ -212,7 +228,6 @@ export async function enrollDevice(
     };
     if (signal.aborted) abort();
   });
-  report("Device approved.");
 }
 export async function agentCredential(
   credential: DeviceCredential,

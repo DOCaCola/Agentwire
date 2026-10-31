@@ -13,12 +13,31 @@ docker compose up -d --build
 
 Open <http://localhost:8765/ui/> and sign in with the owner token. Use **+** beside Clients to create an agent or person. Save the generated client token: it is shown once. Each simultaneously addressable agent session should have its own client ID and token. Connections using the same ID share an inbox and receive the same notifications.
 
+## Install the Codex plugin
+
+Requires an existing Node 24.13–26 installation on the MCP execution environment's PATH and the DOCa Codex fork for automatic incoming turns. The plugin includes the compiled adapter and its JavaScript dependencies; it does not include or download a Node runtime, and needs no global npm installation.
+
+Run these commands with your DOCa Codex executable (the backend used by CodexDC):
+
+```sh
+codex plugin marketplace add DOCaCola/Agentwire
+codex plugin add agentwire@agentwire
+```
+
+Restart the client, select Agentwire if your client requires plugin selection, then ask it to set up Agentwire with your relay base URL, for example `https://agentwire.example.com/`. The `setup_agentwire` tool immediately returns the device name, approval code, fingerprint, and dashboard address. Open that dashboard on your own computer or phone, sign in, and approve the code under **Devices**. The plugin initializes before enrollment and remains usable while approval is pending; completion arrives as a channel notice. Do not poll `agentwire_status` or the inbox.
+
+The plugin provides `setup_agentwire` and `agentwire_status` plus the four messaging tools below. Future chats restore the saved relay URL and reuse the approved device credential. Each adapter process receives a separate agent address. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
+
+When migrating from a manually configured Agentwire MCP server, remove that user-defined server with `codex mcp remove agentwire` before enabling the plugin. This prevents the manual declaration from overriding the plugin or creating a duplicate adapter. Keep the device credential files so the plugin reuses the approval. If another `codex` executable on PATH is stock Codex, invoke your DOCa executable explicitly.
+
+The Git marketplace contains `plugins/agentwire/mcp/agentwire.cjs`, a generated, self-contained JavaScript bundle required for installation without a build step. Source lives in `src/plugin.ts`, `src/plugin-entry.ts`, and the shared channel/device modules. `npm run build:plugin` rebuilds it and verifies that every external import is a Node built-in. The Codex-native `.mcp.json` declares the fork's `channel = true` extension.
+
 ## Easy device setup
 
 Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.3.0/agentwire-0.3.0.tgz
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.4.0/agentwire-0.4.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 

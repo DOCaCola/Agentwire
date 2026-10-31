@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agentwire": {
+      "command": "node",
+      "args": ["./mcp/agentwire.cjs"],
+      "cwd": ".",
+      "channel": true
+    }
+  }
+}

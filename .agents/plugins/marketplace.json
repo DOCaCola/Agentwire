@@ -1,0 +1,12 @@
+{
+  "name": "agentwire",
+  "interface": { "displayName": "Agentwire" },
+  "plugins": [
+    {
+      "name": "agentwire",
+      "source": { "source": "local", "path": "./plugins/agentwire" },
+      "policy": { "installation": "AVAILABLE" },
+      "category": "Communication"
+    }
+  ]
+}
