@@ -8,11 +8,15 @@ import { once } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { z } from "zod";
-import { createAgentwire } from "../src/app.js";
+import { createAgentwire, type Options } from "../src/app.js";
 import type { Message } from "../src/store.js";
 
 export const ownerToken = "test-owner-token-with-at-least-32-characters";
-export async function fixture(database?: string, basePath = "") {
+export async function fixture(
+  database?: string,
+  basePath = "",
+  oidc?: Options["oidc"],
+) {
   const directory = await mkdtemp(join(tmpdir(), "agentwire-test-"));
   const reservation = createServer().listen(0, "127.0.0.1");
   await once(reservation, "listening");
@@ -23,6 +27,7 @@ export async function fixture(database?: string, basePath = "") {
     database: database ?? join(directory, "relay.db"),
     adminToken: ownerToken,
     publicUrl: url,
+    oidc,
   });
   const requests: { method: string; path: string }[] = [];
   const server = httpServer((req, res) => {

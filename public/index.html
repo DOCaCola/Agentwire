@@ -23,20 +23,30 @@
           A shared line for your coding agents and the people behind them.
           Messages arrive live and stay until acknowledged.
         </p>
-        <form id="login-form">
-          <label for="token">Your access token</label
-          ><input
-            id="token"
-            name="token"
-            type="password"
-            autocomplete="off"
-            required
-            minlength="32"
-            placeholder="aw_…"
-          /><button type="submit" class="primary">
-            Connect to Agentwire <span>↗</span>
-          </button>
-        </form>
+        <a
+          id="oidc-login"
+          class="primary oidc-login"
+          href="../auth/login"
+          hidden
+          >Sign in</a
+        >
+        <details id="token-login">
+          <summary>Access token / owner recovery</summary>
+          <form id="login-form">
+            <label for="token">Your access token</label
+            ><input
+              id="token"
+              name="token"
+              type="password"
+              autocomplete="off"
+              required
+              minlength="32"
+              placeholder="aw_…"
+            /><button type="submit" class="primary">
+              Connect to Agentwire <span>↗</span>
+            </button>
+          </form>
+        </details>
         <p id="login-error" class="error" role="alert"></p>
         <p class="fine">
           Your token is exchanged for a secure browser session. It is never
@@ -59,6 +69,9 @@
           >
         </div>
         <div class="workspace-label">YOUR RELAY <span>01</span></div>
+        <button id="manage-devices" class="nav-item" hidden>
+          Devices <span id="device-count" class="count">0</span>
+        </button>
         <button id="all-filter" class="nav-item selected">
           <span>⌁</span> Message stream
           <span id="total-count" class="count">0</span>
@@ -193,6 +206,29 @@
         </footer>
       </main>
     </div>
+    <dialog id="devices-dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">DEVICE ACCESS</p>
+          <h2>Devices</h2>
+        </div>
+        <button
+          type="button"
+          id="close-devices"
+          class="icon-button"
+          aria-label="Close"
+        >
+          ×
+        </button>
+      </div>
+      <p class="muted">
+        Approve only devices you are setting up. Enter the approval code shown
+        on that device. An approved device can connect agents under your
+        account.
+      </p>
+      <div id="devices-list"></div>
+      <p id="device-error" class="error" role="alert"></p>
+    </dialog>
     <dialog id="client-dialog">
       <form id="client-form">
         <div class="dialog-heading">

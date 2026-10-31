@@ -2,6 +2,7 @@ const $ = (id) => document.getElementById(id);
 const relayUrl = new URL("../", document.currentScript.src);
 let me,
   clients = [],
+  devices = [],
   messages = [],
   inboxMessages = [],
   pendingCount = 0,
@@ -71,12 +72,13 @@ function renderClients() {
       node("small", "", `${client.id}${client.id === me.id ? " · you" : ""}`),
     );
     row.append(info);
-    if (me.admin && client.id !== "owner") {
+    if (client.can_manage && client.id !== "owner") {
       const actions = node("div", "client-actions");
       for (const [symbol, title, action] of [
         ["↻", "Rotate token", "rotate"],
         ["×", "Revoke client", "revoke"],
       ]) {
+        if (action === "rotate" && !client.can_rotate) continue;
         const button = node("button", "icon-button", symbol);
         button.title = `${title}: ${client.name}`;
         button.onclick = async () => {
@@ -224,6 +226,7 @@ async function load() {
   const state = await api("/state");
   me = state.client;
   clients = state.clients;
+  devices = state.devices;
   messages = state.messages;
   inboxMessages = state.inbox;
   pending = new Set(state.inbox.map((message) => message.id));
@@ -231,12 +234,113 @@ async function load() {
   $("my-id").textContent = me.id;
   $("my-avatar").textContent = initials(me.name);
   $("add-client").hidden = !me.admin;
+  $("manage-devices").hidden = me.kind !== "human";
   $("login").hidden = true;
   $("workspace").hidden = false;
   renderClients();
   renderMessages();
   renderPending(state.pending);
+  renderDevices();
+  if (
+    location.hash === "#devices" &&
+    me.kind === "human" &&
+    !$("devices-dialog").open
+  )
+    $("devices-dialog").showModal();
 }
+function renderDevices() {
+  $("device-count").textContent = String(
+    devices.filter((device) => device.status === "pending").length,
+  );
+  $("devices-list").replaceChildren();
+  if (!devices.length)
+    $("devices-list").append(
+      node(
+        "p",
+        "muted",
+        "No devices yet. Run agentwire setup on the device you want to connect.",
+      ),
+    );
+  for (const device of devices) {
+    const card = node("section", "device-card");
+    card.append(
+      node("h3", "", device.name),
+      node(
+        "p",
+        "muted",
+        `${device.status} · fingerprint ${device.fingerprint}`,
+      ),
+    );
+    const form = node("form", "device-actions");
+    if (device.status === "pending") {
+      const code = node("input");
+      code.name = "code";
+      code.placeholder = "Approval code";
+      code.autocomplete = "off";
+      code.maxLength = 9;
+      code.setAttribute("aria-label", `Approval code for ${device.name}`);
+      form.append(code);
+    }
+    for (const action of device.status === "pending"
+      ? ["approve", "deny"]
+      : ["revoke"]) {
+      const button = node(
+        "button",
+        action === "approve" ? "primary" : "secondary",
+        action === "approve"
+          ? "Approve"
+          : action === "deny"
+            ? "Deny"
+            : "Revoke device",
+      );
+      button.type = "submit";
+      button.value = action;
+      form.append(button);
+    }
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      const action = event.submitter.value;
+      if (
+        action === "revoke" &&
+        !confirm(`Revoke ${device.name} and all its agent credentials?`)
+      )
+        return;
+      $("device-error").textContent = "";
+      try {
+        await api(`/devices/${device.id}`, {
+          method: "POST",
+          body: JSON.stringify({
+            action,
+            ...(action === "approve"
+              ? {
+                  code: form.elements.code.value
+                    .replace(/-/g, "")
+                    .trim()
+                    .toUpperCase(),
+                }
+              : {}),
+          }),
+        });
+        devices = await api("/devices");
+        renderDevices();
+      } catch (error) {
+        $("device-error").textContent = error.message;
+      }
+    };
+    card.append(form);
+    $("devices-list").append(card);
+  }
+}
+$("manage-devices").onclick = async () => {
+  try {
+    devices = await api("/devices");
+    renderDevices();
+    $("devices-dialog").showModal();
+  } catch (error) {
+    toast(error.message);
+  }
+};
+$("close-devices").onclick = () => $("devices-dialog").close();
 function connect() {
   stream?.close();
   let authChecked = false;
@@ -270,6 +374,10 @@ function connect() {
   stream.addEventListener("clients", (event) => {
     clients = JSON.parse(event.data);
     renderClients();
+  });
+  stream.addEventListener("devices", (event) => {
+    devices = JSON.parse(event.data);
+    renderDevices();
   });
   stream.addEventListener("inbox", (event) => {
     const data = JSON.parse(event.data);
@@ -404,6 +512,18 @@ $("client-dialog").addEventListener("close", () => {
   $("new-token").textContent = "";
   $("new-config").textContent = "";
 });
+api("/auth")
+  .then((auth) => {
+    $("oidc-login").hidden = !auth.oidc;
+    $("oidc-login").textContent = `Sign in with ${auth.label}`;
+    if (location.hash === "#devices")
+      $("oidc-login").href = new URL("auth/login?devices=1", relayUrl).href;
+    $("token-login").open = !auth.oidc;
+  })
+  .catch((error) => {
+    $("login-error").textContent = error.message;
+    $("token-login").open = true;
+  });
 load()
   .then(connect)
   .catch(() => showLogin());

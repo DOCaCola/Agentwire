@@ -64,7 +64,6 @@ export class Store {
         PRIMARY KEY(message_id, client_id)
       );
       CREATE INDEX IF NOT EXISTS inbox ON deliveries(client_id, acked_at, message_id);
-      PRAGMA user_version=1;
     `);
     this.db
       .prepare(
@@ -109,8 +108,8 @@ export class Store {
       .parse(input);
     if (this.db.prepare("SELECT id FROM clients WHERE id=?").get(data.id))
       throw new Problem(409, "Client ID already exists");
-    if (this.clients().length >= 100)
-      throw new Problem(409, "Client limit reached (100)");
+    if (this.clients().length >= 1000)
+      throw new Problem(409, "Client limit reached (1000)");
     const token = newToken();
     this.db
       .prepare("INSERT INTO clients(id,name,kind,token_hash) VALUES (?,?,?,?)")

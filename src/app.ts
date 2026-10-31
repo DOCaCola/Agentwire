@@ -14,11 +14,14 @@ import { McpEndpoint } from "./mcp.js";
 import { ackSchema, inboxSchema } from "./protocol.js";
 import { eventStream } from "./sse.js";
 import { relayUrl } from "./url.js";
+import { IdentityStore } from "./identity.js";
+import { configureOidc, type OidcOptions } from "./oidc.js";
 
 export type Options = {
   database: string;
   adminToken: string;
   publicUrl: string;
+  oidc?: OidcOptions;
 };
 export function createAgentwire(options: Options) {
   if (options.adminToken.length < 32)
@@ -28,6 +31,7 @@ export function createAgentwire(options: Options) {
   const publicUrl = relayUrl(options.publicUrl);
   const basePath = publicUrl.pathname.slice(0, -1);
   const store = new Store(options.database, options.adminToken);
+  const identities = new IdentityStore(store);
   const hub = new Hub(store);
   const mcp = new McpEndpoint(store, hub);
   const sessions = new Map<string, { client: string; expires: number }>();
@@ -64,6 +68,21 @@ export function createAgentwire(options: Options) {
       ? "__Secure-agentwire"
       : "__Host-agentwire"
     : "agentwire";
+  const login = (client: Client, res: Response) => {
+    if (sessions.size >= 1000)
+      throw new Problem(429, "Browser session limit reached");
+    const key = randomBytes(32).toString("base64url");
+    sessions.set(hashToken(key), {
+      client: client.id,
+      expires: Date.now() + 12 * 60 * 60_000,
+    });
+    res.cookie(cookieName, key, { ...cookieOptions, maxAge: 12 * 60 * 60_000 });
+  };
+  const oidc = options.oidc
+    ? configureOidc(app, options.oidc, publicUrl, identities, login, () =>
+        hub.publish({ type: "clients" }),
+      )
+    : undefined;
   const actor = (res: Response) => res.locals.client as Client;
   const authenticate =
     (bearerOnly: boolean) =>
@@ -101,13 +120,75 @@ export function createAgentwire(options: Options) {
     }
     next();
   };
+  const human = (_req: Request, res: Response, next: NextFunction) => {
+    if (actor(res).kind !== "human")
+      throw new Problem(403, "Human access required");
+    next();
+  };
+  const enrollmentStreams = new Map<string, Set<() => void>>();
+  const deviceChanged = (id: string) => {
+    for (const send of enrollmentStreams.get(id) ?? []) send();
+    hub.publish({ type: "devices" });
+  };
   const reap = setInterval(() => {
     for (const [key, value] of sessions)
       if (value.expires < Date.now()) sessions.delete(key);
+    for (const id of identities.expire()) deviceChanged(id);
   }, 60_000).unref();
   app.get("/healthz", (_req, res) => {
     store.db.prepare("SELECT 1").get();
     res.json({ status: "ok" });
+  });
+  app.get("/api/auth", (_req, res) => {
+    res.json({
+      oidc: Boolean(options.oidc),
+      label: options.oidc?.label ?? "OpenID Connect",
+    });
+  });
+  app.post("/api/enrollment", (req, res) => {
+    identities.expire();
+    const device = identities.enroll(req.body);
+    deviceChanged(device.id);
+    res.status(201).json({
+      ...device,
+      verification_url: new URL("ui/#devices", publicUrl).href,
+    });
+  });
+  const deviceCredential = (req: Request) => {
+    const token = req.get("authorization");
+    const device = token?.startsWith("Bearer ")
+      ? identities.credential(token.slice(7))
+      : undefined;
+    if (!device) throw new Problem(401, "Device credential required");
+    return device;
+  };
+  app.get("/api/enrollment/events", (req, res) => {
+    identities.expire();
+    const device = deviceCredential(req);
+    let watchers = enrollmentStreams.get(device.id);
+    if (!watchers) {
+      watchers = new Set();
+      enrollmentStreams.set(device.id, watchers);
+    }
+    if (watchers.size >= 4)
+      throw new Problem(429, "Too many enrollment connections");
+    const { send } = eventStream(res);
+    const update = () => {
+      const current = identities.device(device.id)!;
+      send("enrollment", { status: current.status });
+      if (current.status !== "pending") res.end();
+    };
+    watchers.add(update);
+    res.on("close", () => {
+      watchers.delete(update);
+      if (!watchers.size) enrollmentStreams.delete(device.id);
+    });
+    update();
+  });
+  app.post("/api/device/clients", (req, res) => {
+    const client = identities.session(deviceCredential(req), req.body);
+    hub.publish({ type: "clients" });
+    res.status(201).json({ client });
   });
   app.post("/api/login", (req, res) => {
     const { token } = z
@@ -116,17 +197,8 @@ export function createAgentwire(options: Options) {
       .parse(req.body);
     const client = store.authenticate(token);
     if (!client) throw new Problem(401, "Invalid token");
-    // Keep browser sessions bounded even if a credential is repeatedly submitted.
-    if (sessions.size >= 1000)
-      throw new Problem(429, "Browser session limit reached");
-    const key = randomBytes(32).toString("base64url");
-    sessions.set(hashToken(key), {
-      client: client.id,
-      expires: Date.now() + 12 * 60 * 60_000,
-    });
-    res
-      .cookie(cookieName, key, { ...cookieOptions, maxAge: 12 * 60 * 60_000 })
-      .json({ client });
+    login(client, res);
+    res.json({ client });
   });
   app.use("/api", authenticate(false));
   app.post("/api/logout", (req, res) => {
@@ -137,22 +209,31 @@ export function createAgentwire(options: Options) {
     if (cookie) sessions.delete(hashToken(cookie.slice(cookieName.length + 1)));
     res.clearCookie(cookieName, cookieOptions).json({ ok: true });
   });
-  const clients = () =>
-    store
-      .clients()
-      .map((client) => ({ ...client, connections: hub.online(client.id) }));
+  const clients = (viewer: Client) =>
+    store.clients().map((client) => ({
+      ...client,
+      connections: hub.online(client.id),
+      can_manage:
+        viewer.kind === "human" && identities.owned(viewer, client.id),
+      can_rotate: Boolean(
+        viewer.admin &&
+        !identities.isOidc(client.id) &&
+        !identities.isDeviceClient(client.id),
+      ),
+    }));
   app.get("/api/state", (_req, res) => {
     const client = actor(res);
     res.json({
       client,
-      clients: clients(),
+      clients: clients(client),
       messages: store.history(client.id),
       inbox: store.inbox(client.id, 100),
       pending: store.pending(client.id),
+      devices: client.kind === "human" ? identities.devices(client) : [],
     });
   });
   app.get("/api/clients", (_req, res) => {
-    res.json(clients());
+    res.json(clients(actor(res)));
   });
   app.get("/api/inbox", (req, res) => {
     const { limit } = inboxSchema.parse(
@@ -175,16 +256,54 @@ export function createAgentwire(options: Options) {
     hub.disconnect(id);
     await mcp.disconnect(id);
   };
+  app.get("/api/devices", human, (_req, res) =>
+    res.json(identities.devices(actor(res))),
+  );
+  app.post("/api/devices/:id", human, async (req, res) => {
+    const id = z.string().uuid().parse(req.params.id);
+    const device = identities.decide(actor(res), id, req.body);
+    if (device.status === "revoked") {
+      const children = identities.children(id);
+      for (const child of children)
+        if (store.client(child)) store.revoke(child);
+      await Promise.all(children.map(disconnect));
+    }
+    deviceChanged(id);
+    res.json(device);
+  });
   app.post("/api/clients/:id/rotate", admin, async (req, res) => {
     const id = z.string().parse(req.params.id);
+    if (identities.isOidc(id))
+      throw new Problem(400, "OpenID accounts do not use client tokens");
+    if (identities.isDeviceClient(id))
+      throw new Problem(
+        400,
+        "Device agent credentials are managed on the device; revoke this agent or its device instead",
+      );
     const token = store.rotate(id);
     await disconnect(id);
     res.json({ token });
   });
-  app.delete("/api/clients/:id", admin, async (req, res) => {
+  app.delete("/api/clients/:id", human, async (req, res) => {
     const id = z.string().parse(req.params.id);
+    if (!identities.owned(actor(res), id))
+      throw new Problem(403, "Client is not yours");
     store.revoke(id);
-    await disconnect(id);
+    const disconnected = [id];
+    // Revoking a human account also invalidates all devices they approved.
+    for (const device of identities
+      .devices({ ...actor(res), admin: 1 })
+      .filter((item) => item.owner_id === id && item.status === "approved")) {
+      identities.decide({ ...actor(res), admin: 1 }, device.id, {
+        action: "revoke",
+      });
+      for (const child of identities.children(device.id)) {
+        if (store.client(child)) store.revoke(child);
+        disconnected.push(child);
+      }
+      deviceChanged(device.id);
+    }
+    await Promise.all(disconnected.map(disconnect));
     res.json({ ok: true });
   });
   app.post("/api/messages", (req, res) => {
@@ -243,7 +362,11 @@ export function createAgentwire(options: Options) {
             send("message", event.message, event.message.id);
             break;
           case "clients":
-            send("clients", clients());
+            send("clients", clients(store.client(client.id)!));
+            break;
+          case "devices":
+            if (client.kind === "human")
+              send("devices", identities.devices(store.client(client.id)!));
             break;
           case "inbox":
             send("inbox", {
@@ -302,9 +425,12 @@ export function createAgentwire(options: Options) {
   return {
     app: mounted,
     store,
+    identities,
     hub,
     async close() {
       clearInterval(reap);
+      oidc?.close();
+      for (const watchers of enrollmentStreams.values()) watchers.clear();
       hub.close();
       await mcp.close();
       store.close();

@@ -13,6 +13,12 @@ unnecessary defensive checks, silent fallbacks, or compatibility shims.
   Claude-compatible channel adapter. Do not add inbox polling or repurpose
   logging/progress notifications as chat events.
 - Preserve bounded message bodies, query pages, connection counts, and buffers.
+- Device secrets are generated and kept on the client. Enrollment sends hashes;
+  approval requires a signed-in human and the device's displayed code. A device
+  credential can provision its agents but cannot access any message inbox.
+- OpenID identity is `(issuer, subject)`. Validate state, nonce, PKCE, signed ID
+  tokens, and configured groups. Never link by email or trust proxy identity
+  headers. Revoking a device or human must revoke all affected agent credentials.
 - The current DOCa fork supports idle wakeup through `channel = true` and the
   stdio Claude channel contract. Its removed `surface_notifications` path is not
   supported. Keep notices compact and coalesced; see README.md.

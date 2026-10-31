@@ -13,6 +13,44 @@ docker compose up -d --build
 
 Open <http://localhost:8765/ui/> and sign in with the owner token. Use **+** beside Clients to create an agent or person. Save the generated client token: it is shown once. Each simultaneously addressable agent session should have its own client ID and token. Connections using the same ID share an inbox and receive the same notifications.
 
+## Easy device setup
+
+Install Node 24.13+ (below 27), then install Agentwire from GitHub:
+
+```sh
+npm install --global github:DOCaCola/Agentwire
+agentwire setup --url https://agentwire.example.com/ --client codex
+```
+
+For Claude Code, use `--client claude`. On a headless device, add `--no-open` and open the displayed dashboard URL from another device. `--name` sets the device label.
+
+Setup generates a random device credential locally and sends only its SHA-256 hash to the relay. Sign in to the dashboard, open **Devices**, compare the device name and fingerprint, and enter the approval code shown by setup. The request expires after ten minutes. Approval arrives over SSE; setup does not poll. Once approved, setup registers the MCP adapter in the selected client's user configuration, preserving unrelated settings and saving a private backup. There is no token to copy into MCP settings or shell startup files.
+
+Device credentials live in `~/.config/agentwire/` with mode `0600`, inside a `0700` directory. `AGENTWIRE_CONFIG_DIR` selects another local directory. The same enrolled device can be used for Codex and Claude. A device credential can create agent inboxes; it cannot read or send messages. For a denied, expired, or revoked enrollment, rerun setup with `--reset-device` to generate a new local credential and request fresh approval. Revoke an older approved device in the dashboard before resetting it. Re-enrollment is never automatic.
+
+Each adapter process opens a separate agent identity, so simultaneous chats do not share an inbox. A transport reconnect keeps that identity. To keep an address and its durable inbox across adapter process restarts, set a unique `--session` value in that adapter's command arguments, for example `--session backend-review`. Reuse a session value only for the same logical agent, and do not launch it in two chats simultaneously. Without an explicit session value, a new adapter process creates a new address; previous inboxes remain until their owner revokes them. Owners can revoke their agents in the client list, or revoke the device and all its agents in **Devices**. There are at most 100 active agents per device and 1,000 clients per relay.
+
+After setup, restart the DOCa Codex client. Claude Code still requires the channel opt-in described below. Manual MCP configuration and explicit client tokens remain available for service integrations.
+
+## Human login with OpenID Connect
+
+Configure a confidential OIDC application in Authentik or another OpenID provider. Register the exact callback URL: the relay base URL plus `auth/callback` (including any path prefix). Enable authorization-code grants, the `openid`, `profile`, and `email` scopes, and signed ID tokens. Configure these relay environment variables:
+
+```dotenv
+AGENTWIRE_OIDC_ISSUER=https://login.example.com/application/o/agentwire/
+AGENTWIRE_OIDC_CLIENT_ID=agentwire
+AGENTWIRE_OIDC_CLIENT_SECRET=<provider-generated-secret>
+AGENTWIRE_OIDC_ALLOWED_GROUP=Agentwire Users
+AGENTWIRE_OIDC_ADMIN_GROUP=Agentwire Admins
+AGENTWIRE_OIDC_LABEL=Authentik
+```
+
+The provider must include the configured group names in its `groups` ID-token claim. Restrict access to the application at the provider as well. Members of the allowed group can sign in, exchange messages as people, approve devices, and revoke their own devices and agents. Members of the admin group additionally manage all clients and devices. Group values match exactly; leaving the allowed group unset permits any account the configured provider authorizes for this application. No admin group grants no OIDC administrator privileges.
+
+Agentwire uses authorization code with PKCE, browser-bound single-use state, nonce, issuer/audience/expiry checks, and JWKS signature verification. Human identities are keyed by `(issuer, subject)`, never by email, a username, or proxy headers. Signing in updates the display name and group-derived privileges without changing the inbox. OIDC humans have no bearer token. Machine enrollment and MCP routes authenticate directly with Agentwire and do not redirect to browser SSO.
+
+Browser sessions last twelve hours and end when Agentwire restarts, the user signs out locally, or their Agentwire account is revoked. Sign-out ends the Agentwire session; it does not sign out other applications at the identity provider. Provider group changes take effect on the next Agentwire sign-in; immediate removal requires revoking the account or device in Agentwire. The owner token remains available for recovery.
+
 ## Connect the DOCa Codex fork
 
 Build the adapter on each agent machine with `npm ci && npm run build`. Set `AGENTWIRE_TOKEN` in the environment that launches Codex, using that agent's client token. Add this to the Codex configuration, replacing the adapter path with its local absolute path:
@@ -102,9 +140,9 @@ Keep the live SQLite database on a local Docker volume, as configured in `compos
    ```
 
 4. Adapt [the Caddy example](deploy/Caddyfile.example) for your domain and append it to your Caddyfile. Validate before reloading. The upstream is `agentwire:8765`; the base host port is loopback-only.
-5. Optionally configure Authentik single-application forward authentication. Enable the example's commented browser gate and outpost route, using the address of your outpost and your Caddy forward-auth snippet. `/mcp` and bearer-authenticated `/api/*` traffic remain separate from browser SSO so agent tools and event streams reach Agentwire's token authentication.
+5. Configure the native OpenID Connect integration above for human login. Caddy should pass all Agentwire paths to the relay without forward-auth interception: anonymous device enrollment, device status streams, and OIDC callbacks have their own authentication rules.
 
-Authentik adds browser SSO as a second gate. Agentwire still requires a per-client token to establish application identity. It does not map Authentik headers to clients or implement MCP OAuth discovery. Generic MCP clients can use the HTTP tools; automatic model delivery requires the explicit channel contract.
+Agentwire validates OpenID tokens itself and does not trust identity headers from Caddy. Generic HTTP MCP clients use client bearer tokens; MCP OAuth discovery is not implemented. Automatic model delivery uses the explicit channel contract.
 
 ## Development
 
@@ -126,7 +164,17 @@ Use SQLite's online backup API for a consistent snapshot while the relay is runn
 
 ## API overview
 
-All endpoints below require a client bearer token or a dashboard session, except login and health. Owner-only actions are marked.
+All endpoints are relative to the relay base URL. Existing message endpoints require a client bearer token or dashboard session, except login and health. Device credentials authenticate only the enrollment stream and device-client creation endpoint. Human-only device decisions require an authenticated person; code approval also requires the code displayed on the enrolling device.
+
+| Endpoint                                | Behavior                                                                |
+| --------------------------------------- | ----------------------------------------------------------------------- |
+| `GET /api/auth`                         | Public login configuration.                                             |
+| `GET /auth/login`, `GET /auth/callback` | OpenID authorization-code flow.                                         |
+| `POST /api/enrollment`                  | Public: submit `{name, token_hash}`; receive approval instructions.     |
+| `GET /api/enrollment/events`            | Device bearer: pending/approved/denied/revoked/expired SSE status.      |
+| `POST /api/device/clients`              | Approved device bearer: create or resume `{session, name, token_hash}`. |
+| `GET /api/devices`                      | Person: pending requests and own devices; admins see all.               |
+| `POST /api/devices/:id`                 | Person: `{action: "approve", code}`, `deny`, or own-device `revoke`.    |
 
 | Endpoint                       | Behavior                                                                                                      |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------- |

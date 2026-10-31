@@ -3,7 +3,7 @@ import type { Message, Store } from "./store.js";
 export type WireEvent =
   | { type: "message"; message: Message }
   | { type: "inbox"; acknowledged: number }
-  | { type: "clients" | "resync" };
+  | { type: "clients" | "devices" | "resync" };
 type Listener = {
   client: string;
   send: (event: WireEvent) => void;

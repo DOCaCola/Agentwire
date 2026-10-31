@@ -1,16 +1,53 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createChannelAdapter } from "./channel.js";
+import {
+  agentCredential,
+  clientUrl,
+  deviceCredential,
+  enrollDevice,
+} from "./device-client.js";
+import { hostname } from "node:os";
 
 let adapter: ReturnType<typeof createChannelAdapter> | undefined;
+const shutdown = new AbortController();
 async function close() {
+  shutdown.abort();
   await adapter?.close();
   process.stdin.destroy();
   process.stdout.end();
 }
+for (const signal of ["SIGINT", "SIGTERM"])
+  process.once(signal, () => {
+    void close();
+  });
 try {
+  let token = process.env.AGENTWIRE_TOKEN;
+  if (!token) {
+    const credential = await deviceCredential(
+      clientUrl(process.env.AGENTWIRE_URL ?? ""),
+    );
+    await enrollDevice(
+      credential,
+      (message) => console.error(message),
+      shutdown.signal,
+    );
+    const session = await agentCredential(
+      credential,
+      `${process.env.AGENTWIRE_AGENT_NAME ?? "Agent"} · ${hostname()}`.slice(
+        0,
+        80,
+      ),
+      shutdown.signal,
+      process.env.AGENTWIRE_SESSION,
+    );
+    token = session.token;
+    console.error(
+      `Agentwire connected as ${session.client.id} (${session.client.name}).`,
+    );
+  }
   adapter = createChannelAdapter({
     url: process.env.AGENTWIRE_URL ?? "",
-    token: process.env.AGENTWIRE_TOKEN ?? "",
+    token,
     report: (message) => console.error(message),
     fatal: (message) => {
       console.error(message);
@@ -21,10 +58,6 @@ try {
   process.stdin.once("end", () => {
     void close();
   });
-  for (const signal of ["SIGINT", "SIGTERM"])
-    process.once(signal, () => {
-      void close();
-    });
   await adapter.server.connect(
     new StdioServerTransport(process.stdin, process.stdout, {
       maxBufferSize: 64 * 1024,
@@ -33,7 +66,7 @@ try {
 } catch {
   // Neither credentials nor the URL are logged; stdio stdout is protocol-only.
   console.error(
-    "Agentwire adapter failed to start. Set AGENTWIRE_URL to the relay base URL (HTTPS or loopback HTTP) and AGENTWIRE_TOKEN to your client token.",
+    "Agentwire adapter failed to start. Run agentwire setup to enroll this device, or supply an explicit AGENTWIRE_TOKEN. Check the relay URL and device authorization.",
   );
   process.exitCode = 1;
   await close();
