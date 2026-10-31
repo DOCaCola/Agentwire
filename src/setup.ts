@@ -73,7 +73,7 @@ export async function setupClient(
     if (servers) delete servers.agentwire;
     const resultServers = result.mcp_servers as Record<string, unknown>;
     delete resultServers.agentwire;
-    if (!config.mcp_servers) config.mcp_servers = {};
+    if (!config.mcp_servers) delete result.mcp_servers;
     if (!isDeepStrictEqual(config, result))
       throw new Error("MCP configuration edit would change unrelated settings");
   }

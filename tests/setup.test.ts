@@ -2,7 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  rm,
+  unlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,6 +105,14 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
     assert.deepEqual(claude.projects, { "/example": { trusted: true } });
     assert.deepEqual(claude.mcpServers.existing, { command: "keep" });
     assert.equal(claude.mcpServers.agentwire.args[1], "adapter");
+    // A newly installed client has no configuration or mcp_servers table yet.
+    await unlink(join(home, ".codex/config.toml"));
+    const fresh = setup("codex");
+    assert.deepEqual(await fresh.done, [0, null], fresh.errors);
+    const freshConfig = parse(
+      await readFile(join(home, ".codex/config.toml"), "utf8"),
+    );
+    assert.equal((freshConfig.mcp_servers as any).agentwire.channel, true);
     async function connect(name: string) {
       const client = new Client({ name: "setup-live-check", version: "1.0.0" });
       adapters.push(client);
