@@ -27,6 +27,13 @@ export class Hub {
   }
   publish(event: WireEvent, only?: string): void {
     for (const listener of this.listeners) {
+      // A device/account revocation can invalidate several clients in one batch.
+      // Remove every revoked listener before publishing roster or device data.
+      if (!this.store.client(listener.client)) {
+        this.listeners.delete(listener);
+        listener.close();
+        continue;
+      }
       if (only && listener.client !== only) continue;
       if (
         event.type === "message" &&
