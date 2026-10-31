@@ -301,9 +301,82 @@ test("adapter rejects remote HTTP and credentials in relay URLs", () => {
     /without credentials/,
   );
   assert.throws(
-    () => createChannelAdapter({ ...options, url: "https://example.com/mcp" }),
+    () =>
+      createChannelAdapter({ ...options, url: "https://example.com/?token=x" }),
     /without credentials/,
   );
+});
+
+test("a path-mounted relay serves dashboard, cookies, MCP, and pushed channel tools under its prefix", async () => {
+  const f = await fixture(undefined, "/relay");
+  let a: Awaited<ReturnType<typeof adapter>> | undefined;
+  try {
+    const root = await fetch(f.url + "/", { redirect: "manual" });
+    assert.equal(root.headers.get("location"), "/relay/ui/");
+    const ui = await fetch(f.url + "/ui/", { redirect: "manual" });
+    assert.equal(ui.status, 200);
+    assert.match(await ui.text(), /src="\.\/app.js"/);
+    assert.equal((await fetch(f.url + "/ui/app.js")).status, 200);
+    assert.equal((await fetch(new URL("/api/state", f.url))).status, 404);
+    assert.equal((await fetch(new URL("/healthz", f.url))).status, 404);
+    assert.equal((await fetch(f.url + "/healthz")).status, 200);
+    const login = await f.request("/api/login", ownerToken, {
+      token: ownerToken,
+    });
+    const cookie = login.headers.get("set-cookie")!;
+    assert.match(cookie, /Path=\/relay\//);
+    assert.equal(
+      (
+        await fetch(f.url + "/api/state", {
+          headers: { Cookie: cookie.split(";")[0]! },
+        })
+      ).status,
+      200,
+    );
+    const bob = await f.add("bob");
+    a = await adapter(f.url, bob);
+    const remote = await f.mcp(ownerToken);
+    const result = toolData(
+      await remote.client.callTool({
+        name: "send_message",
+        arguments: { to: "bob", body: "Subpath delivery" },
+      }),
+    );
+    await until(() => a!.notifications.length === 1);
+    const inbox = toolData(
+      await a.client.callTool({ name: "read_inbox", arguments: {} }),
+    );
+    assert.equal(inbox.messages[0].id, result.id);
+    assert.equal(inbox.messages[0].body, "Subpath delivery");
+    await a.client.callTool({
+      name: "acknowledge_messages",
+      arguments: { ids: [result.id] },
+    });
+    assert.equal(
+      (await (await f.request("/api/inbox", bob)).json()).pending,
+      0,
+    );
+    const sent = await a.client.callTool({
+      name: "send_message",
+      arguments: { to: "owner", body: "Subpath reply" },
+    });
+    assert.equal(sent.isError, undefined);
+    assert.ok(
+      toolData(
+        await a.client.callTool({ name: "list_clients", arguments: {} }),
+      ).some((client: { id: string }) => client.id === "bob"),
+    );
+    assert.ok(
+      f.requests.every(
+        (request) =>
+          request.path.startsWith("/relay/") ||
+          ["/api/state", "/healthz"].includes(request.path),
+      ),
+    );
+  } finally {
+    await a?.client.close();
+    await f.stop();
+  }
 });
 
 test("a redirected channel is rejected without forwarding its credential", async () => {

@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { EventSource } from "eventsource";
 import { z } from "zod";
+import { relayUrl } from "./url.js";
 import {
   ackSchema,
   inboxSchema,
@@ -24,18 +25,7 @@ class RelayError extends Error {}
 
 /** Local Claude-compatible stdio channel; remote identity and visibility remain relay-owned. */
 export function createChannelAdapter(options: ChannelOptions) {
-  const url = new URL(options.url);
-  if (
-    url.username ||
-    url.password ||
-    url.pathname !== "/" ||
-    url.search ||
-    url.hash
-  ) {
-    throw new Error(
-      "AGENTWIRE_URL must be an origin without credentials, path, query, or fragment",
-    );
-  }
+  const url = relayUrl(options.url);
   const loopback =
     url.hostname === "localhost" ||
     url.hostname === "[::1]" ||
@@ -94,7 +84,7 @@ Messages can be redelivered after reconnect or adapter restart until acknowledge
   }
   server.oninitialized = () => {
     if (stream || stopped) return;
-    stream = new EventSource(new URL("/api/channel-events", url), {
+    stream = new EventSource(new URL("api/channel-events", url), {
       fetch: async (input, init) => {
         const response = await fetch(input, {
           ...init,
@@ -149,7 +139,7 @@ Messages can be redelivered after reconnect or adapter restart until acknowledge
   ) {
     let response: globalThis.Response;
     try {
-      response = await fetch(new URL(path, url), {
+      response = await fetch(new URL(path.slice(1), url), {
         method,
         redirect: "error",
         headers: {

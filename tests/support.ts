@@ -12,13 +12,13 @@ import { createAgentwire } from "../src/app.js";
 import type { Message } from "../src/store.js";
 
 export const ownerToken = "test-owner-token-with-at-least-32-characters";
-export async function fixture(database?: string) {
+export async function fixture(database?: string, basePath = "") {
   const directory = await mkdtemp(join(tmpdir(), "agentwire-test-"));
   const reservation = createServer().listen(0, "127.0.0.1");
   await once(reservation, "listening");
   const port = (reservation.address() as { port: number }).port;
   await new Promise<void>((resolve) => reservation.close(() => resolve()));
-  const url = `http://127.0.0.1:${port}`;
+  const url = `http://127.0.0.1:${port}${basePath}`;
   const wire = createAgentwire({
     database: database ?? join(directory, "relay.db"),
     adminToken: ownerToken,

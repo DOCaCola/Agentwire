@@ -13,6 +13,7 @@ import { Hub } from "./hub.js";
 import { McpEndpoint } from "./mcp.js";
 import { ackSchema, inboxSchema } from "./protocol.js";
 import { eventStream } from "./sse.js";
+import { relayUrl } from "./url.js";
 
 export type Options = {
   database: string;
@@ -24,17 +25,8 @@ export function createAgentwire(options: Options) {
     throw new Error(
       "AGENTWIRE_ADMIN_TOKEN must contain at least 32 characters",
     );
-  const publicUrl = new URL(options.publicUrl);
-  if (
-    !["http:", "https:"].includes(publicUrl.protocol) ||
-    publicUrl.pathname !== "/" ||
-    publicUrl.search ||
-    publicUrl.hash
-  ) {
-    throw new Error(
-      "AGENTWIRE_PUBLIC_URL must be an HTTP(S) origin, without a path",
-    );
-  }
+  const publicUrl = relayUrl(options.publicUrl);
+  const basePath = publicUrl.pathname.slice(0, -1);
   const store = new Store(options.database, options.adminToken);
   const hub = new Hub(store);
   const mcp = new McpEndpoint(store, hub);
@@ -65,9 +57,13 @@ export function createAgentwire(options: Options) {
     httpOnly: true,
     sameSite: "strict" as const,
     secure: publicUrl.protocol === "https:",
-    path: "/",
+    path: publicUrl.pathname,
   };
-  const cookieName = cookieOptions.secure ? "__Host-agentwire" : "agentwire";
+  const cookieName = cookieOptions.secure
+    ? basePath
+      ? "__Secure-agentwire"
+      : "__Host-agentwire"
+    : "agentwire";
   const actor = (res: Response) => res.locals.client as Client;
   const authenticate =
     (bearerOnly: boolean) =>
@@ -267,10 +263,10 @@ export function createAgentwire(options: Options) {
     await mcp.handle(req, res, actor(res));
   });
   app.get("/", (_req, res) => {
-    res.redirect("/ui/");
+    res.redirect(`${basePath}/ui/`);
   });
   app.get("/ui", (_req, res) => {
-    res.redirect("/ui/");
+    res.redirect(`${basePath}/ui/`);
   });
   app.use(
     "/ui",
@@ -300,8 +296,11 @@ export function createAgentwire(options: Options) {
     }
   };
   app.use(errors);
+  const mounted = express();
+  mounted.disable("x-powered-by");
+  mounted.use(basePath || "/", app);
   return {
-    app,
+    app: mounted,
     store,
     hub,
     async close() {

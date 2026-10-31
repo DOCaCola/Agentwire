@@ -33,7 +33,7 @@ try {
 } catch {
   // Neither credentials nor the URL are logged; stdio stdout is protocol-only.
   console.error(
-    "Agentwire adapter failed to start. Set AGENTWIRE_URL to the relay origin (HTTPS or loopback HTTP) and AGENTWIRE_TOKEN to your client token.",
+    "Agentwire adapter failed to start. Set AGENTWIRE_URL to the relay base URL (HTTPS or loopback HTTP) and AGENTWIRE_TOKEN to your client token.",
   );
   process.exitCode = 1;
   await close();

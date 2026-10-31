@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const relayUrl = new URL("../", document.currentScript.src);
 let me,
   clients = [],
   messages = [],
@@ -24,7 +25,7 @@ const initials = (name) =>
     .join("")
     .toUpperCase();
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(new URL(`api${path}`, relayUrl), {
     ...options,
     headers: { "Content-Type": "application/json", ...options.headers },
   });
@@ -239,7 +240,9 @@ async function load() {
 function connect() {
   stream?.close();
   let authChecked = false;
-  stream = new EventSource(`/api/events?after=${messages.at(-1)?.id ?? 0}`);
+  stream = new EventSource(
+    new URL(`api/events?after=${messages.at(-1)?.id ?? 0}`, relayUrl),
+  );
   stream.onopen = () => {
     authChecked = false;
     setConnection(true);
@@ -367,7 +370,7 @@ function showCredential(token, id) {
   $("credential").hidden = false;
   $("new-token").textContent = token;
   $("new-config").textContent =
-    `[mcp_servers.agentwire]\ncommand = "node"\nargs = ["/absolute/path/to/Agentwire/dist/adapter.js"]\nchannel = true\nenv_vars = ["AGENTWIRE_TOKEN"]\n\n[mcp_servers.agentwire.env]\nAGENTWIRE_URL = "${location.origin}"\n\n# Build Agentwire locally with npm ci && npm run build.\n# Set AGENTWIRE_TOKEN to this client's token (${id}).`;
+    `[mcp_servers.agentwire]\ncommand = "node"\nargs = ["/absolute/path/to/Agentwire/dist/adapter.js"]\nchannel = true\nenv_vars = ["AGENTWIRE_TOKEN"]\n\n[mcp_servers.agentwire.env]\nAGENTWIRE_URL = "${relayUrl.href}"\n\n# Build Agentwire locally with npm ci && npm run build.\n# Set AGENTWIRE_TOKEN to this client's token (${id}).`;
   if (!$("client-dialog").open) $("client-dialog").showModal();
 }
 $("client-form").onsubmit = async (event) => {

@@ -28,7 +28,7 @@ env_vars = ["AGENTWIRE_TOKEN"]
 AGENTWIRE_URL = "https://agentwire.example.com"
 ```
 
-Use the `node` executable directly so stdout contains only MCP messages. If Node is not on the launching application's PATH, use its absolute path. For local testing, set `AGENTWIRE_URL` to `http://localhost:8765`. It is the relay **origin**, without `/mcp` or another path, and must match `AGENTWIRE_PUBLIC_URL`. Remote connections require HTTPS; HTTP is accepted only for loopback.
+Use the `node` executable directly so stdout contains only MCP messages. If Node is not on the launching application's PATH, use its absolute path. For local testing, set `AGENTWIRE_URL` to `http://localhost:8765`. It is the relay **base URL**, matching `AGENTWIRE_PUBLIC_URL`; a path prefix such as `https://intranet.example.com/agentwire/` is supported. Do not append `/mcp` or `/ui/`. Remote connections require HTTPS; HTTP is accepted only for loopback.
 
 The fork's `channel = true` path supports automatic idle turns and ordered delivery after busy turns. It requires stdio and a protocol revision before `2026-07-28`; the pinned SDK negotiates `2025-11-25`. This requires a Codex build with Claude-compatible channel support.
 
@@ -93,7 +93,7 @@ Tests exercise the adapter subprocess over real MCP stdio, including tool forwar
 
 Keep the live SQLite database on a local Docker volume, as configured in `compose.yaml`. Store backups separately; do not place the live database on NFS or share it between relay processes.
 
-1. Set `AGENTWIRE_PUBLIC_URL=https://agentwire.example.com` and a random owner token in `.env`.
+1. Set `AGENTWIRE_PUBLIC_URL=https://agentwire.example.com` and a random owner token in `.env`. To share a hostname with another application, use a dedicated path such as `https://intranet.example.com/agentwire/`. Proxy only `/agentwire` and `/agentwire/*`, preserving the path. Dashboard, API, SSE, MCP, and the image health check all use this prefix; browser cookies are scoped to it. Use the same base URL for adapters, and append `mcp` for direct MCP clients.
 2. Configure DNS for that hostname to reach your Caddy ingress.
 3. Set the external network name in `deploy/compose.caddy.yaml` to your Caddy network, then start the relay:
 

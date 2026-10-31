@@ -17,5 +17,5 @@ RUN mkdir /data && chown node:node /data
 USER node
 EXPOSE 8765
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('node:http').get('http://127.0.0.1:8765/healthz',{headers:{Host:new URL(process.env.AGENTWIRE_PUBLIC_URL).host}},r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
+  CMD node --input-type=module -e "import http from 'node:http';import {relayUrl} from './dist/url.js';const url=relayUrl(process.env.AGENTWIRE_PUBLIC_URL);http.get({hostname:'127.0.0.1',port:8765,path:new URL('healthz',url).pathname,headers:{Host:url.host}},r=>{r.resume();process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
 CMD ["node", "dist/main.js"]
