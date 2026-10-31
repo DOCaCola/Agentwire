@@ -31,6 +31,8 @@ const setupSchema = z
 const settingsSchema = z
   .object({ url: z.string().transform((value) => clientUrl(value).href) })
   .strict();
+type Join = z.infer<typeof joinSchema>;
+const joinedSchema = z.object({ room: z.string(), name: z.string() });
 type State =
   | { status: "unconfigured" }
   | { status: "connecting"; url: string }
@@ -48,6 +50,7 @@ type State =
       status: "joined";
       url: string;
       room: string;
+      name: string;
       client_id: string;
       client_name: string;
     }
@@ -96,7 +99,7 @@ export function createPluginAdapter(options: {
     join(homedir(), ".config", "agentwire");
   const settingsPath = join(directory, "plugin.json");
   const server = new Server(
-    { name: "agentwire", version: "0.5.0" },
+    { name: "agentwire", version: "0.6.0" },
     {
       capabilities: { experimental: { "claude/channel": {} }, tools: {} },
       instructions: `Agentwire is a relay between coding agents and people. Call join_room with the user's room/task name to collaborate. An approved plugin stays ready without creating an agent identity until explicitly joining. Call agentwire_status on request to inspect setup or participation. If unconfigured, ask for the user's relay base URL and call setup_agentwire.
@@ -110,7 +113,7 @@ ${channelInstructions}`,
   let relay: ReturnType<typeof createRelayConnection> | undefined;
   let approved: DeviceCredential | undefined;
   let agent: Awaited<ReturnType<typeof agentCredential>> | undefined;
-  let requestedRoom: string | undefined;
+  let requestedJoin: Join | undefined;
   let joining = false;
   let configuring = false,
     closed = false;
@@ -150,14 +153,14 @@ ${channelInstructions}`,
     };
     options.report(state.message);
   }
-  async function joinRoom(room: string, signal: AbortSignal) {
+  async function joinRoom(join: Join, signal: AbortSignal) {
     if (joining)
       return result({ error: "A room change is already in progress" }, true);
     if (["pending_approval", "connecting"].includes(state.status)) {
-      requestedRoom = room;
+      requestedJoin = join;
       return result({
         ...state,
-        requested_room: room,
+        requested_room: join.room,
         message: "The room will be joined after device approval. Do not poll.",
       });
     }
@@ -197,13 +200,17 @@ ${channelInstructions}`,
           );
         },
       });
-      const joined = await relay.call("join_room", { room }, signal);
+      const joined = await relay.call("join_room", join, signal);
       active.signal.throwIfAborted();
       if (joined.isError) return joined;
+      const membership = joinedSchema.parse(
+        JSON.parse(joined.content[0]!.text),
+      );
       state = {
         status: "joined",
         url: credential.url,
-        room,
+        room: membership.room,
+        name: membership.name,
         client_id: agent.client.id,
         client_name: agent.client.name,
       };
@@ -224,14 +231,14 @@ ${channelInstructions}`,
     if (active !== attempt || closed || active.signal.aborted) return;
     approved = credential;
     state = { status: "ready", url: credential.url };
-    const room = requestedRoom;
-    requestedRoom = undefined;
-    if (room) await joinRoom(room, active.signal);
+    const join = requestedJoin;
+    requestedJoin = undefined;
+    if (join) await joinRoom(join, active.signal);
     if (active !== attempt || closed || active.signal.aborted) return;
     if (notify)
       controlNotice(
         "device-approved",
-        room
+        join
           ? "Agentwire device approval completed. Call agentwire_status once to check the requested room, then continue your task."
           : "Agentwire device approval completed. The plugin is ready; it has not joined a room. Call join_room only for a task the user wants to collaborate on.",
       );
@@ -278,7 +285,7 @@ ${channelInstructions}`,
     relay = undefined;
     approved = undefined;
     agent = undefined;
-    requestedRoom = undefined;
+    requestedJoin = undefined;
     const active = new AbortController();
     attempt = active;
     state = { status: "connecting", url: url.href };
@@ -373,14 +380,14 @@ ${channelInstructions}`,
     if (request.params.name === "join_room") {
       try {
         return await joinRoom(
-          joinSchema.parse(request.params.arguments ?? {}).room,
+          joinSchema.parse(request.params.arguments ?? {}),
           context.signal,
         );
       } catch {
         return result(
           {
             error:
-              "Supply a room name of 1–80 letters, numbers, spaces, dots, underscores or hyphens",
+              "Supply a room name of 1–80 letters, numbers, spaces, dots, underscores or hyphens, and optionally a name of 1–80 characters",
           },
           true,
         );
@@ -392,7 +399,7 @@ ${channelInstructions}`,
         .parse(request.params.arguments ?? {});
       if (joining)
         return result({ error: "A room change is already in progress" }, true);
-      requestedRoom = undefined;
+      requestedJoin = undefined;
       if (relay) {
         const left = await relay.call("leave_room", {}, context.signal);
         if (left.isError) return left;

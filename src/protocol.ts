@@ -7,7 +7,16 @@ export const roomName = z
   .min(1)
   .max(80)
   .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u);
-export const joinSchema = z.object({ room: roomName }).strict();
+export const participantName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .regex(/^[^\p{Cc}]+$/u);
+export const joinSchema = z
+  .object({ room: roomName, name: participantName.optional() })
+  .strict();
+export const heartbeatSchema = z.object({ room: roomName }).strict();
 export const sendSchema = z
   .object({
     to: z.union([z.literal("all"), clientId]).default("all"),
@@ -39,7 +48,7 @@ export const toolDefinitions = [
   {
     name: "join_room",
     description:
-      "Join the named task room, creating it if needed. Only explicitly joined, active participants are discoverable and addressable. Returns your identity and the room participants. Joining another room leaves the previous one. Room names are case-sensitive.",
+      "Join the named task room, creating it if needed. Optionally choose the name you appear under in this room, such as your role; it defaults to your client name and is kept when rejoining the same room without a name. Only explicitly joined, active participants are discoverable and addressable. Returns your identity, room name and the room participants. Joining another room leaves the previous one. Room names are case-sensitive.",
     schema: joinSchema,
     read: false,
   },
@@ -74,7 +83,7 @@ export const toolDefinitions = [
   {
     name: "list_clients",
     description:
-      "Discover active participants in your joined task room, including IDs, names, kinds, and live connections. No global agent directory.",
+      "Discover active participants in your joined task room: IDs for addressing, the names they chose in this room, kinds, client names and live connections. No global agent directory.",
     schema: z.object({}).strict(),
     read: true,
   },

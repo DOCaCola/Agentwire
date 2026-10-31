@@ -3,307 +3,250 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="theme-color" content="#101718" />
-    <title>Agentwire · Relay</title>
+    <meta name="theme-color" content="#f6f7f6" />
+    <title>Agentwire</title>
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./style.css" />
     <script src="./app.js" defer></script>
   </head>
   <body>
-    <section id="login" class="login">
+    <main id="login" class="login" hidden>
       <div class="login-card">
-        <div class="brand">
-          <img src="./icon.svg" alt="" width="38" height="38" /><span
-            >agentwire<span class="brand-dot">.</span></span
-          >
-        </div>
-        <p class="eyebrow">ONE WIRE. EVERY AGENT.</p>
-        <h1>Keep the conversation moving.</h1>
-        <p class="muted">
-          A shared line for your coding agents and the people behind them.
-          Messages arrive live and stay until acknowledged.
+        <img src="./icon.svg" alt="" width="40" height="40" />
+        <h1>Agentwire</h1>
+        <p id="login-status" class="muted">
+          Sign in to follow and join your agents’ chats.
         </p>
         <a
           id="oidc-login"
-          class="primary oidc-login"
+          class="button primary wide"
           href="../auth/login"
           hidden
           >Sign in</a
         >
         <details id="token-login">
-          <summary>Access token / owner recovery</summary>
+          <summary>Use an access token</summary>
           <form id="login-form">
-            <label for="token">Your access token</label
-            ><input
+            <label for="token">Access token</label>
+            <input
               id="token"
-              name="token"
               type="password"
               autocomplete="off"
               required
               minlength="32"
               placeholder="aw_…"
-            /><button type="submit" class="primary">
-              Connect to Agentwire <span>↗</span>
-            </button>
+            />
+            <button type="submit" class="button primary wide">Sign in</button>
           </form>
         </details>
         <p id="login-error" class="error" role="alert"></p>
-        <p class="fine">
-          Your token is exchanged for a secure browser session. It is never
-          stored in browser storage or a URL.
-        </p>
       </div>
-      <div class="login-art" aria-hidden="true">
-        <div class="wire-line"></div>
-        <span class="wire-node node-a">A</span
-        ><span class="wire-node node-b">B</span
-        ><span class="wire-node node-c">YOU</span>
-        <div class="art-label">DIFFERENT MACHINES.<br />SAME CONVERSATION.</div>
-      </div>
-    </section>
-    <div id="workspace" class="workspace" hidden>
+    </main>
+
+    <div id="app" class="app" hidden>
       <aside class="sidebar">
-        <div class="brand">
-          <img src="./icon.svg" alt="" width="30" height="30" /><span
-            >agentwire<span class="brand-dot">.</span></span
+        <header class="sidebar-head">
+          <span class="brand"
+            ><img
+              src="./icon.svg"
+              alt=""
+              width="22"
+              height="22"
+            />Agentwire</span
           >
-        </div>
-        <div class="workspace-label">YOUR RELAY <span>01</span></div>
-        <button id="manage-devices" class="nav-item" hidden>
-          Devices <span id="device-count" class="count">0</span>
-        </button>
-        <button id="all-filter" class="nav-item selected">
-          <span>⌁</span> Message stream
-          <span id="total-count" class="count">0</span>
-        </button>
-        <div class="section-label">
-          ROOM PARTICIPANTS
-          <button
-            id="add-client"
-            class="icon-button"
-            aria-label="Add client"
-            title="Add client"
-            hidden
-          >
-            +
-          </button>
-        </div>
-        <div id="clients" class="clients"></div>
-        <div class="sidebar-note">
-          <span class="little-dot"></span> Push connected<br /><span
-            >Durable inboxes. No polling.</span
-          >
-        </div>
-        <div class="identity">
-          <span id="my-avatar" class="avatar human"></span>
-          <div><strong id="my-name"></strong><small id="my-id"></small></div>
-          <button
-            id="logout"
-            class="icon-button"
-            aria-label="Sign out"
-            title="Sign out"
-          >
-            ↪
-          </button>
-        </div>
-      </aside>
-      <main>
-        <header class="topbar">
-          <div>
-            <span class="eyebrow">COMMUNICATIONS</span>
-            <h1>
-              Message stream <span id="channel-label">/ all channels</span>
-            </h1>
-          </div>
-          <div id="connection" class="connection">
-            <span class="little-dot"></span> Connecting
-          </div>
+          <button id="new-chat" class="button small">New chat</button>
         </header>
-        <form id="room-form" class="room-bar">
-          <label for="room-name">Task room</label>
-          <input
-            id="room-name"
-            list="room-options"
-            maxlength="80"
-            required
-            placeholder="MyTask"
-            autocomplete="off"
-          />
-          <datalist id="room-options"></datalist>
-          <button type="submit" class="primary">Join room</button>
-          <button type="button" id="leave-room" class="secondary" hidden>
-            Leave
+        <button id="device-notice" class="device-notice" hidden></button>
+        <nav id="chat-list" class="chat-list" aria-label="Chats"></nav>
+        <p id="no-chats" class="sidebar-empty" hidden>No chats yet.</p>
+        <footer class="account">
+          <div class="me">
+            <span id="my-avatar" class="avatar human"></span>
+            <strong id="my-name"></strong>
+          </div>
+          <div class="account-links">
+            <button id="open-devices" class="link">Devices</button>
+            <button id="open-tokens" class="link" hidden>Access tokens</button>
+            <button id="logout" class="link">Sign out</button>
+          </div>
+        </footer>
+      </aside>
+
+      <section class="conversation">
+        <header class="conversation-head">
+          <button id="back" class="icon-button back" aria-label="All chats">
+            ‹
           </button>
-          <span id="room-status" role="status"
-            >Join a room to collaborate.</span
-          >
-        </form>
-        <section class="overview">
-          <div>
-            <span class="metric-label">ON THE WIRE</span
-            ><strong id="online-count">0 <small>clients online</small></strong>
+          <div class="title">
+            <h1 id="chat-title"></h1>
+            <p id="chat-subtitle"></p>
           </div>
-          <div>
-            <span class="metric-label">YOUR INBOX</span
-            ><strong id="pending-count">0 <small>unacknowledged</small></strong>
-          </div>
-          <p>Across machines.<br /><span>Without missing a beat.</span></p>
-        </section>
-        <div class="stream-toolbar">
-          <div>
-            <span class="live-indicator"></span> LIVE FEED
-            <span class="divider">/</span>
-            <span id="feed-description">Messages visible to you</span>
-          </div>
-          <label class="channel-filter"
-            >Channel
-            <select id="channel-filter">
-              <option value="">All channels</option>
-            </select></label
-          >
+          <span id="connection" class="connection" role="status"></span>
+          <button id="toggle-people" class="button small">People</button>
+        </header>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <div id="placeholder" class="placeholder">
+          <h2 id="placeholder-title"></h2>
+          <p id="placeholder-text"></p>
         </div>
-        <section
-          id="messages"
-          class="messages"
-          aria-label="Messages"
-          aria-live="polite"
-        ></section>
-        <div id="empty" class="empty">
-          <div class="empty-symbol">⌁</div>
-          <h2>A quiet wire is a fresh start.</h2>
-          <p>Join a task room, then invite agents to join the same name.</p>
-        </div>
-        <footer class="composer-wrap">
+        <footer id="compose-area" class="compose-area">
+          <div id="join-bar" class="join-bar">
+            <span id="join-text"></span>
+            <button id="join-chat" class="button primary">Join chat</button>
+          </div>
           <form id="composer" class="composer">
-            <div class="composer-top">
-              <label
-                >To
-                <select id="recipient">
-                  <option value="all">Everyone in room</option>
-                </select></label
-              ><label
-                >Channel
-                <input
-                  id="channel"
-                  value="general"
-                  pattern="[a-z0-9][a-z0-9_\-]{0,47}"
-                  required
-                  maxlength="48"
-                  aria-label="Message channel" /></label
-              ><label class="kind-label"
-                >Type
-                <select id="kind">
-                  <option value="note">Note</option>
-                  <option value="question">Question</option>
-                  <option value="answer">Answer</option>
-                  <option value="directive">Directive</option>
-                  <option value="done">Done</option>
-                </select></label
+            <div id="reply-chip" class="reply-chip" hidden>
+              <span id="reply-text"></span>
+              <button
+                type="button"
+                id="cancel-reply"
+                class="icon-button"
+                aria-label="Cancel reply"
               >
-            </div>
-            <label class="sr-only" for="body">Message</label
-            ><textarea
-              id="body"
-              rows="2"
-              maxlength="2000"
-              required
-              placeholder="Share an update, ask a question, or hand something over…"
-            ></textarea>
-            <div class="composer-bottom">
-              <span
-                ><kbd>⌘</kbd> / <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send
-                <span id="reply-info"></span></span
-              ><button type="submit" class="primary">
-                Send message <span>↑</span>
+                ×
               </button>
             </div>
+            <div class="composer-row">
+              <select id="recipient" aria-label="Send to"></select>
+              <textarea
+                id="body"
+                rows="1"
+                maxlength="2000"
+                required
+                placeholder="Write a message"
+                aria-label="Message"
+              ></textarea>
+              <button type="submit" class="button primary">Send</button>
+            </div>
           </form>
-          <p class="footer-note">
-            Identity verified by your token <span>•</span> Messages persist
-            until you acknowledge them
-          </p>
         </footer>
-      </main>
-    </div>
-    <dialog id="devices-dialog">
-      <div class="dialog-heading">
-        <div>
-          <p class="eyebrow">DEVICE ACCESS</p>
-          <h2>Devices</h2>
-        </div>
-        <button
-          type="button"
-          id="close-devices"
-          class="icon-button"
-          aria-label="Close"
-        >
-          ×
-        </button>
-      </div>
-      <p class="muted">
-        Approve only devices you are setting up. Enter the approval code shown
-        on that device. An approved device can connect agents under your
-        account.
-      </p>
-      <div id="devices-list"></div>
-      <p id="device-error" class="error" role="alert"></p>
-    </dialog>
-    <dialog id="client-dialog">
-      <form id="client-form">
-        <div class="dialog-heading">
-          <div>
-            <p class="eyebrow">EXPAND THE WIRE</p>
-            <h2>Add a client</h2>
-          </div>
-          <button
-            type="button"
-            class="icon-button close-dialog"
-            aria-label="Close"
-          >
+      </section>
+
+      <aside id="people-pane" class="people-pane">
+        <header>
+          <h2>People</h2>
+          <button id="close-people" class="icon-button" aria-label="Close">
             ×
           </button>
+        </header>
+        <ul id="people" class="people"></ul>
+        <p id="no-people" class="muted" hidden>Nobody is in this chat now.</p>
+        <section id="me-in-chat" class="me-in-chat" hidden>
+          <p>You appear as <strong id="my-room-name"></strong></p>
+          <div class="row">
+            <button id="rename" class="button small">Rename</button>
+            <button id="leave" class="button small">Leave chat</button>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <dialog id="join-dialog">
+      <form id="join-form">
+        <h2 id="join-title">New chat</h2>
+        <label id="room-field"
+          >Chat name
+          <input
+            id="join-room"
+            maxlength="80"
+            required
+            autocomplete="off"
+            placeholder="MyTask"
+        /></label>
+        <label
+          >Your name in this chat
+          <input id="join-name" maxlength="80" required autocomplete="off"
+        /></label>
+        <p id="join-hint" class="hint"></p>
+        <p id="join-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="button" data-close>Cancel</button>
+          <button type="submit" id="join-submit" class="button primary">
+            Join
+          </button>
         </div>
-        <p class="muted">
-          Give each agent or person their own identity and access token.
-        </p>
-        <label for="client-id">Client ID</label
-        ><input
-          id="client-id"
-          required
-          pattern="[a-z][a-z0-9\-]{0,47}"
-          maxlength="48"
-          placeholder="codex-laptop"
-        /><label for="client-name">Display name</label
-        ><input
-          id="client-name"
-          required
-          maxlength="80"
-          placeholder="Codex · Laptop"
-        /><label for="client-kind">Client type</label
-        ><select id="client-kind">
-          <option value="agent">Coding agent</option>
-          <option value="human">Person</option></select
-        ><button type="submit" class="primary">
-          Create client <span>+</span>
-        </button>
+      </form>
+    </dialog>
+
+    <dialog id="person-dialog">
+      <div class="dialog-head">
+        <h2 id="person-name"></h2>
+        <button class="icon-button" data-close aria-label="Close">×</button>
+      </div>
+      <dl class="details">
+        <dt>Type</dt>
+        <dd id="person-kind"></dd>
+        <dt>Client</dt>
+        <dd id="person-client"></dd>
+        <dt>Status</dt>
+        <dd id="person-status"></dd>
+      </dl>
+      <p id="person-error" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="person-message" class="button">Message privately</button>
+        <button id="person-rotate" class="button">New token</button>
+        <button id="person-revoke" class="button danger">Revoke access</button>
+      </div>
+    </dialog>
+
+    <dialog id="devices-dialog" class="wide-dialog">
+      <h2>Devices</h2>
+      <p class="muted">
+        Approve a device with the code it shows. Its agents then act under your
+        account.
+      </p>
+      <div id="devices-list" class="devices"></div>
+      <p id="device-error" class="error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="button" data-close>Close</button>
+      </div>
+    </dialog>
+
+    <dialog id="tokens-dialog">
+      <form id="client-form">
+        <h2>New access token</h2>
+        <p class="muted">For a client that cannot use device approval.</p>
+        <label
+          >ID
+          <input
+            id="client-id"
+            required
+            pattern="[a-z][a-z0-9\-]{0,47}"
+            maxlength="48"
+            placeholder="ci-runner"
+        /></label>
+        <label
+          >Name
+          <input
+            id="client-name"
+            required
+            maxlength="80"
+            placeholder="CI runner"
+        /></label>
+        <label
+          >Type
+          <select id="client-kind">
+            <option value="agent">Agent</option>
+            <option value="human">Person</option>
+          </select></label
+        >
+        <p id="client-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" class="button" data-close>Cancel</button>
+          <button type="submit" class="button primary">Create</button>
+        </div>
       </form>
       <section id="credential" hidden>
-        <p class="eyebrow">CLIENT READY</p>
-        <h2>Save this token now.</h2>
-        <p class="muted">
-          It is shown once. Use it in this client's MCP configuration or
-          dashboard login.
-        </p>
+        <h2>Copy this token now</h2>
+        <p class="muted">It is shown only once.</p>
         <pre id="new-token"></pre>
-        <button id="copy-token" class="primary">Copy token</button>
-        <details>
-          <summary>Codex fork channel configuration</summary>
-          <pre id="new-config"></pre>
-        </details>
-        <button class="secondary close-dialog">Done</button>
+        <div class="dialog-actions">
+          <button id="copy-token" class="button">Copy</button>
+          <button class="button primary" data-close>Done</button>
+        </div>
       </section>
-      <p id="client-error" class="error" role="alert"></p>
     </dialog>
+
     <div id="toast" class="toast" role="status" hidden></div>
   </body>
 </html>

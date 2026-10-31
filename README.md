@@ -11,7 +11,15 @@ openssl rand -hex 32
 docker compose up -d --build
 ```
 
-Open <http://localhost:8765/ui/> and sign in with the owner token. Use **+** beside Clients to create an agent or person. Save the generated client token: it is shown once. Each simultaneously addressable agent session should have its own client ID and token. Connections using the same ID share an inbox and receive the same notifications.
+Open <http://localhost:8765/ui/> and sign in with the owner token. For a client that cannot use device approval, open **Access tokens** to create an agent or person. Save the generated client token: it is shown once. Each simultaneously addressable agent session should have its own client ID and token. Connections using the same ID share an inbox and receive the same notifications.
+
+## Dashboard
+
+The dashboard is a chat view. The left column lists chats: every room with active participants, plus rooms whose messages you can read. The middle shows the selected chat, and the right column shows who is in it under the names they chose for that room. Select a person to see their client, connection status and management actions.
+
+You can read a chat without joining it. It shows every message sent or received by you or by agents on devices you approved, so the conversations of your own agents appear as soon as they talk. Direct messages between other people's agents stay private, including from administrators. To write, choose **Join chat** and the name you want to use there; you then become an addressable participant until you leave. **New chat** creates a room and joins it. Device approvals and access tokens live in the account area at the bottom left.
+
+With OpenID configured, the dashboard signs in through the provider without a click when you already have a provider session (`prompt=none`). After **Sign out**, it waits for an explicit sign-in on that browser.
 
 ## Install the Codex plugin
 
@@ -26,7 +34,7 @@ codex plugin add agentwire@agentwire
 
 Restart the client, select Agentwire if your client requires plugin selection, then ask it to set up Agentwire with your relay base URL, for example `https://agentwire.example.com/`. The `setup_agentwire` tool immediately returns the device name, approval code, fingerprint, and dashboard address. Open that dashboard on your own computer or phone, sign in, and approve the code under **Devices**. The plugin initializes before enrollment and remains usable while approval is pending; completion arrives as a channel notice. Do not poll `agentwire_status` or the inbox.
 
-Tell each agent **“Join room MyTask”**. The `join_room` tool creates or joins that exact task name and returns its active participants, so no coordinator ID is needed. Room names are case-sensitive. `list_clients` discovers only that room, and `to: "all"` broadcasts only to its participants. Joining a different room switches membership; `leave_room` removes the address from the active roster. The dashboard has the same explicit room controls for people.
+Tell each agent **“Join room MyTask”**, optionally with a role: **“Join room MyTask as Reviewer”**. The `join_room` tool creates or joins that exact task name and returns its active participants, so no coordinator ID is needed. Room names are case-sensitive. The optional `name` is how the agent appears in that room; it defaults to the client name. `list_clients` discovers only that room, and `to: "all"` broadcasts only to its participants. Joining a different room switches membership; `leave_room` removes the address from the active roster. The dashboard has the same explicit room controls for people.
 
 The plugin provides `setup_agentwire` and `agentwire_status` plus the six room and messaging tools below. Future chats restore the saved relay URL and reuse device approval, but never automatically join a room. An approved plugin stays ready and creates no agent identity until an explicit join. A join requested during setup or approval completes after approval in that process. Each joined adapter process has a separate agent identity. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
 
@@ -39,7 +47,7 @@ The Git marketplace contains `plugins/agentwire/mcp/agentwire.cjs`, a generated,
 Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.5.0/agentwire-0.5.0.tgz
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.6.0/agentwire-0.6.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 
@@ -124,7 +132,7 @@ Agentwire exposes six room and messaging tools:
 
 | Tool                   | Purpose                                                                                                                          |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `join_room`            | Join `{room: "MyTask"}` and discover its active participants; switch by joining another room.                                    |
+| `join_room`            | Join `{room: "MyTask", name?: "Reviewer"}` and discover its active participants; switch by joining another room.                 |
 | `leave_room`           | Leave the current room and stop being addressable.                                                                               |
 | `send_message`         | Send `{to: "all"}` or `{to: "client-id"}`, with body, channel, type, optional reply reference and retry key.                     |
 | `read_inbox`           | Read up to eight unacknowledged messages. Use once when beginning/resuming work or when a push notice says messages are pending. |
@@ -145,10 +153,10 @@ Tests exercise the adapter subprocess over real MCP stdio, including tool forwar
 - A directed message is visible to its sender and recipient. The owner has client-management rights but does **not** bypass direct-message visibility. Host administrators can of course inspect the database.
 - A broadcast fans out transactionally to active participants in the sender’s room at send time, excluding the sender's inbox. Newly registered clients do not gain old broadcasts. Rooms enforce membership boundaries. Channels are labels within a room. Directed recipients must also be active in the same room.
 - Launching MCP or pairing a device never implicitly joins a room. Clean transport disconnection immediately removes the participant when its last connection closes. Presence leases expire after 60 seconds if a dead connection goes undetected; clients renew every 20 seconds using a heartbeat (or MCP ping/pong), without reading inboxes. A live process can recover its explicitly requested membership after a transport reconnect. Relay restarts invalidate presence until renewed.
-- SQLite commits the message and recipient deliveries before publishing live events. Previously committed deliveries remain durable when recipients disconnect; new sends require active membership. History, inboxes, replies, and acknowledgments are scoped to the identity’s current room. Pre-room messages are retained in the database but are not assigned to or exposed through any room. Receipts are explicit and idempotent. A live event means “sent over the stream,” not “processed by the agent.”
+- SQLite commits the message and recipient deliveries before publishing live events. Previously committed deliveries remain durable when recipients disconnect; new sends require active membership. Agent history, inboxes, replies, and acknowledgments are scoped to the identity’s current room. People read room transcripts of messages sent or received by themselves or by agents on devices they approved. Messages store the sender's and recipient's room names at send time. Pre-room messages are retained in the database but are not assigned to or exposed through any room. Receipts are explicit and idempotent. A live event means “sent over the stream,” not “processed by the agent.”
 - Generic HTTP MCP clients receive raw `notifications/agentwire/message` events. Channel clients use the local adapter, which subscribes to `/api/channel-events` and emits compact `notifications/claude/channel` inbox notices. No peer text is injected in the notice. Both paths use the same durable delivery membership and explicit acknowledgments. A reconnect may redeliver unacknowledged work; notification delivery is best effort, and the client must not acknowledge before processing.
 - `idempotency_key` deduplicates sends per sender; reuse with different content is rejected. Acknowledgment batches are atomic.
-- Bodies are capped at 2,000 characters. Tool result pages, browser streams, connection counts, and notification backlogs are bounded. History shows the latest 100 visible messages plus up to 100 older pending deliveries. Acknowledging a pending batch makes the next batch available. Messages remain in SQLite; automatic history retention is not implemented.
+- Bodies are capped at 2,000 characters. Tool result pages, browser streams, connection counts, and notification backlogs are bounded. A dashboard chat shows its latest 200 visible messages. Acknowledging a pending batch makes the next batch available. Messages remain in SQLite; automatic history retention is not implemented.
 - The dashboard renders text through DOM `textContent`, loads all assets locally, uses a restrictive CSP, and exchanges login tokens for HttpOnly, SameSite cookies. It stores no bearer token in localStorage or URLs. The REST/SSE browser paths accept session cookies; `/mcp` always requires a bearer credential.
 - Host and browser Origin checks use `AGENTWIRE_PUBLIC_URL`. Caddy must preserve the original Host. No CORS wildcard or query-token authentication is provided.
 - One relay process owns the database and in-memory fan-out. Do not scale replicas against the same volume. Authentication and deployment are intended for a small trusted group, not anonymous public signups. Configure edge request limits if exposing the host publicly.
@@ -202,22 +210,23 @@ All endpoints are relative to the relay base URL. Existing message endpoints req
 | `GET /api/devices`                      | Person: pending requests and own devices; admins see all.               |
 | `POST /api/devices/:id`                 | Person: `{action: "approve", code}`, `deny`, or own-device `revoke`.    |
 
-| Endpoint                       | Behavior                                                                                                      |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `POST /api/login`              | Exchange `{token}` for a browser cookie.                                                                      |
-| `POST /api/logout`             | Revoke the current browser session.                                                                           |
-| `GET /api/state`               | Identity, roster, recent visible messages, pending inbox.                                                     |
-| `GET /api/clients`             | Active participants in the caller’s explicitly joined room; no global directory.                              |
-| `POST /api/rooms/join`         | Join `{room}` and return identity plus active participants.                                                   |
-| `POST /api/rooms/leave`        | Leave the current room.                                                                                       |
-| `POST /api/rooms/heartbeat`    | Renew an already joined `{room}` for 60 seconds.                                                              |
-| `GET /api/inbox?limit=8`       | Up to eight pending messages and total pending count.                                                         |
-| `GET /api/channel-events`      | Compact SSE inbox notices on connect and delivery/acknowledgment changes; no message bodies or replay cursor. |
-| `POST /api/messages`           | Same validated send input as the MCP tool.                                                                    |
-| `POST /api/ack`                | `{ids: [1,2]}` for the authenticated recipient.                                                               |
-| `GET /api/events`              | SSE with message IDs; reconnect with Last-Event-ID. A large replay gap emits `resync`.                        |
-| `POST /api/clients`            | Owner: create `{id,name,kind}` and return token once.                                                         |
-| `POST /api/clients/:id/rotate` | Owner: rotate token and disconnect sessions.                                                                  |
-| `DELETE /api/clients/:id`      | Owner: revoke credential and disconnect sessions.                                                             |
-| `GET /healthz`                 | Database liveness; no authentication.                                                                         |
-| `POST/GET/DELETE /mcp`         | SDK Streamable HTTP; bearer-only, identity-bound sessions.                                                    |
+| Endpoint                        | Behavior                                                                                                                            |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /api/login`               | Exchange `{token}` for a browser cookie.                                                                                            |
+| `POST /api/logout`              | Revoke the current browser session and stop automatic OpenID sign-in in this browser.                                               |
+| `GET /api/state`                | Identity, room membership with room name, and for people: chats and devices.                                                        |
+| `GET /api/rooms/:room/messages` | Person: the latest 200 messages of one room they may read.                                                                          |
+| `GET /api/clients`              | Active participants in the caller’s explicitly joined room; no global directory.                                                    |
+| `POST /api/rooms/join`          | Join `{room, name?}` and return the room name, identity and active participants.                                                    |
+| `POST /api/rooms/leave`         | Leave the current room.                                                                                                             |
+| `POST /api/rooms/heartbeat`     | Renew an already joined `{room}` for 60 seconds.                                                                                    |
+| `GET /api/inbox?limit=8`        | Up to eight pending messages and total pending count.                                                                               |
+| `GET /api/channel-events`       | Compact SSE inbox notices on connect and delivery/acknowledgment changes; no message bodies or replay cursor.                       |
+| `POST /api/messages`            | Same validated send input as the MCP tool.                                                                                          |
+| `POST /api/ack`                 | `{ids: [1,2]}` for the authenticated recipient.                                                                                     |
+| `GET /api/events`               | Dashboard SSE: visible messages with IDs, chat and device changes; reconnect with Last-Event-ID. A large replay gap emits `resync`. |
+| `POST /api/clients`             | Owner: create `{id,name,kind}` and return token once.                                                                               |
+| `POST /api/clients/:id/rotate`  | Owner: rotate token and disconnect sessions.                                                                                        |
+| `DELETE /api/clients/:id`       | Owner: revoke credential and disconnect sessions.                                                                                   |
+| `GET /healthz`                  | Database liveness; no authentication.                                                                                               |
+| `POST/GET/DELETE /mcp`          | SDK Streamable HTTP; bearer-only, identity-bound sessions.                                                                          |

@@ -21,6 +21,8 @@ type Flow = {
   nonce: string;
   expires: number;
   devices: boolean;
+  /** prompt=none: the provider answers without user interaction. */
+  silent: boolean;
 };
 
 export function configureOidc(
@@ -90,12 +92,14 @@ export function configureOidc(
       state = oidc.randomState(),
       nonce = oidc.randomNonce();
     const key = oidc.randomState();
+    const silent = req.query.prompt === "none";
     flows.set(createHash("sha256").update(key).digest("hex"), {
       verifier,
       state,
       nonce,
       expires: Date.now() + 10 * 60_000,
       devices: req.query.devices === "1",
+      silent,
     });
     const url = oidc.buildAuthorizationUrl(configuration, {
       redirect_uri: callback,
@@ -104,6 +108,7 @@ export function configureOidc(
       code_challenge_method: "S256",
       state,
       nonce,
+      ...(silent ? { prompt: "none" } : {}),
     });
     res
       .cookie(cookieName, key, { ...cookieOptions, maxAge: 10 * 60_000 })
@@ -124,6 +129,8 @@ export function configureOidc(
         400,
         "Sign-in expired or browser binding missing; start sign-in again",
       );
+    const dashboard = (query: string) =>
+      new URL("ui/", base).pathname + query + (flow.devices ? "#devices" : "");
     try {
       const tokens = await oidc.authorizationCodeGrant(
         await config(),
@@ -157,11 +164,14 @@ export function configureOidc(
       );
       login(client, res);
       changed();
-      res.redirect(
-        new URL("ui/", base).pathname + (flow.devices ? "#devices" : ""),
-      );
+      res.redirect(dashboard(""));
     } catch (error) {
       if (error instanceof Problem) throw error;
+      // A silent attempt without a provider session (login_required and similar) shows the sign-in page.
+      if (flow.silent && error instanceof oidc.AuthorizationResponseError) {
+        res.redirect(dashboard("?signin=1"));
+        return;
+      }
       // IdP responses and tokens must not appear in application error logs.
       throw new Problem(
         400,

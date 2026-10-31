@@ -24,9 +24,8 @@ test("only explicit room participants can discover, address, receive, reply to o
       409,
     );
     const empty = await (await f.request("/api/state", idle)).json();
-    assert.deepEqual(empty.clients, []);
-    assert.deepEqual(empty.rooms, []);
-    assert.equal(empty.room, null);
+    assert.deepEqual(empty.chats, []);
+    assert.equal(empty.membership, null);
     assert.equal(
       (await f.request("/api/rooms/join", alice, { room: "MyTask" })).status,
       200,
@@ -58,7 +57,7 @@ test("only explicit room participants can discover, address, receive, reply to o
     assert.deepEqual(launched.notifications, []);
     await f.request("/api/rooms/join", carol, { room: "MyTask" });
     assert.deepEqual(
-      f.store.history("carol"),
+      f.store.transcript("carol", "MyTask"),
       [],
       "joining later cannot read previous broadcasts",
     );
@@ -164,6 +163,64 @@ test("disconnects and expired presence remove participants without losing their 
   }
 });
 
+test("participants choose a name per room and messages keep the names used when sent", async () => {
+  const f = await fixture();
+  try {
+    const alice = await f.add("alice", null),
+      bob = await f.add("bob", null);
+    const joined = await (
+      await f.request("/api/rooms/join", alice, {
+        room: "MyTask",
+        name: "Planner",
+      })
+    ).json();
+    assert.equal(joined.name, "Planner");
+    await f.request("/api/rooms/join", bob, { room: "MyTask" });
+    assert.deepEqual(
+      (await (await f.request("/api/clients", bob)).json()).map(
+        (p: { id: string; name: string; client_name: string }) => [
+          p.id,
+          p.name,
+          p.client_name,
+        ],
+      ),
+      [
+        ["bob", "BOB", "BOB"],
+        ["alice", "Planner", "ALICE"],
+      ],
+    );
+    const sent = await (
+      await f.request("/api/messages", bob, { to: "alice", body: "hi" })
+    ).json();
+    assert.equal(sent.sender_name, "BOB");
+    assert.equal(sent.recipient_name, "Planner");
+    await f.request("/api/rooms/join", alice, { room: "MyTask" });
+    assert.equal(f.store.membership("alice")!.name, "Planner");
+    await f.request("/api/rooms/join", alice, {
+      room: "MyTask",
+      name: "Reviewer",
+    });
+    assert.equal(f.store.inbox("alice")[0]!.recipient_name, "Planner");
+    assert.equal(
+      f.store.participants("bob").find((p) => p.id === "alice")!.name,
+      "Reviewer",
+    );
+    await f.request("/api/rooms/join", alice, { room: "Other" });
+    assert.equal(f.store.membership("alice")!.name, "ALICE");
+    assert.equal(
+      (
+        await f.request("/api/rooms/join", alice, {
+          room: "Other",
+          name: "bad\u0007",
+        })
+      ).status,
+      400,
+    );
+  } finally {
+    await f.stop();
+  }
+});
+
 test("MCP room joins return discoverable peers, switch atomically and reject unjoined tools", async () => {
   const f = await fixture();
   try {
@@ -263,9 +320,9 @@ test("version 2 databases retain historical messages without exposing them in a 
   try {
     assert.equal(
       f.store.db.prepare("PRAGMA user_version").get()!.user_version,
-      3,
+      4,
     );
-    assert.deepEqual(f.store.history("owner"), []);
+    assert.deepEqual(f.store.latest("owner"), []);
     const old = f.store.db.prepare("SELECT body,room FROM messages").get()!;
     assert.equal(old.body, "Legacy broadcast");
     assert.equal(old.room, null);

@@ -29,7 +29,7 @@ export async function fixture(
     publicUrl: url,
     oidc,
   });
-  wire.store.joinRoom("owner", "test-room");
+  wire.store.joinRoom("owner", { room: "test-room" });
   const requests: { method: string; path: string }[] = [];
   const server = httpServer((req, res) => {
     requests.push({ method: req.method!, path: req.url! });

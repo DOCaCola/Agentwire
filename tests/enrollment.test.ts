@@ -159,8 +159,8 @@ test("device enrollment requires human code approval, streams status without pol
     assert.deepEqual(again, a);
     assert.notEqual(a.token, b.token);
     assert.notEqual(a.client.id, b.client.id);
-    f.store.joinRoom(a.client.id, "test-room");
-    f.store.joinRoom(b.client.id, "test-room");
+    f.store.joinRoom(a.client.id, { room: "test-room", name: "Reviewer" });
+    f.store.joinRoom(b.client.id, { room: "test-room" });
     const sent = await (
       await f.request("/api/messages", a.token, {
         to: b.client.id,
@@ -171,12 +171,32 @@ test("device enrollment requires human code approval, streams status without pol
       (await (await f.request("/api/inbox", b.token)).json()).messages[0].id,
       sent.id,
     );
-    assert.equal(
-      (await (await f.request("/api/state", alice.token)).json()).messages
-        .length,
-      0,
-    );
     const bob = f.store.createClient({ id: "bob", name: "Bob", kind: "human" });
+    // The approving person reads their own agents' chats without joining; other people do not.
+    const watched = await (
+      await f.request("/api/rooms/test-room/messages", alice.token)
+    ).json();
+    assert.deepEqual(
+      watched.map((message: { id: number }) => message.id),
+      [sent.id],
+    );
+    assert.equal(watched[0].sender_name, "Reviewer");
+    assert.equal(watched[0].recipient_name, "Agent B");
+    const chats = (await (await f.request("/api/state", alice.token)).json())
+      .chats;
+    assert.equal(chats[0].room, "test-room");
+    assert.equal(chats[0].last.id, sent.id);
+    assert.deepEqual(
+      await (
+        await f.request("/api/rooms/test-room/messages", bob.token)
+      ).json(),
+      [],
+    );
+    assert.equal(
+      (await (await f.request("/api/state", bob.token)).json()).chats[0].last,
+      null,
+      "active rooms are listed without other people's messages",
+    );
     assert.equal(
       (await (await f.request("/api/devices", bob.token)).json()).length,
       0,
@@ -333,7 +353,7 @@ test("concurrent device setup persists a single private credential and stable se
       abort.signal,
       "stable-chat",
     );
-    f.store.joinRoom(a.client.id, "test-room");
+    f.store.joinRoom(a.client.id, { room: "test-room" });
     const message = await (
       await f.request("/api/messages", ownerToken, {
         to: a.client.id,
@@ -349,7 +369,7 @@ test("concurrent device setup persists a single private credential and stable se
       "stable-chat",
     );
     assert.equal(restored.token, a.token);
-    f.store.joinRoom(restored.client.id, "test-room");
+    f.store.joinRoom(restored.client.id, { room: "test-room" });
     assert.equal(restored.client.id, a.client.id);
     assert.equal(
       (await (await f.request("/api/inbox", a.token)).json()).messages[0].id,

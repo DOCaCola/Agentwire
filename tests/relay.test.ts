@@ -148,13 +148,16 @@ test("REST, browser SSE, and MCP share recipient isolation, strict validation, a
       1,
       "invalid acknowledgment batch rolls back entirely",
     );
-    const hidden = await (await f.request("/api/state", carol)).json();
-    assert.deepEqual(hidden.messages, []);
-    const owner = await (await f.request("/api/state")).json();
+    assert.deepEqual(f.store.transcript("carol", "test-room"), []);
     assert.deepEqual(
-      owner.messages,
+      await (await f.request("/api/rooms/test-room/messages")).json(),
       [],
       "owner does not bypass direct-message privacy",
+    );
+    assert.equal(
+      (await f.request("/api/rooms/test-room/messages", carol)).status,
+      403,
+      "agents have no transcript access outside their inbox",
     );
     const hashes = f.store.db.prepare("SELECT token_hash FROM clients").all();
     assert.ok(hashes.every((row) => String(row.token_hash).length === 64));
@@ -175,10 +178,7 @@ test("REST, browser SSE, and MCP share recipient isolation, strict validation, a
     ).json();
     const newcomer = await f.add("newcomer");
     assert.equal(f.store.pending("newcomer"), 0);
-    assert.deepEqual(
-      (await (await f.request("/api/state", newcomer)).json()).messages,
-      [],
-    );
+    assert.deepEqual(f.store.transcript("newcomer", "test-room"), []);
     assert.equal(f.store.inbox("carol")[0]!.id, broadcast.id);
   } finally {
     await f.stop();
@@ -216,7 +216,7 @@ test("authentication, browser cookies, origin validation, and revocation protect
     assert.equal(wrongHost, 421);
     assert.equal((await fetch(f.url + "/ui/")).status, 200);
     const html = await (await fetch(f.url + "/ui/")).text();
-    assert.ok(html.includes("Keep the conversation moving"));
+    assert.ok(html.includes("<title>Agentwire</title>"));
     assert.ok(
       (await (await fetch(f.url + "/ui/app.js")).text()).includes(
         "new EventSource",
@@ -297,8 +297,11 @@ test("messages, recipient snapshots, tokens, and acknowledgments survive a proce
     await f.stop();
     f = await fixture(database);
     assert.equal(f.store.pending("bob"), 0);
-    f.store.joinRoom("bob", "test-room");
-    assert.equal(f.store.history("bob")[0]!.body, "Survives restart");
+    f.store.joinRoom("bob", { room: "test-room" });
+    assert.equal(
+      f.store.transcript("bob", "test-room")[0]!.body,
+      "Survives restart",
+    );
     assert.equal(f.store.authenticate(alice)!.id, "alice");
   } finally {
     await f.stop();
@@ -319,7 +322,7 @@ test("large SSE replay gaps request a bounded resync; slow replay consumers keep
     await until(() => replay.events.some((event) => event.type === "message"));
     // More data than one response write buffer: this must never write after end
     // or mark unconsumed messages as acknowledged.
-    f.store.joinRoom("bob", "test-room");
+    f.store.joinRoom("bob", { room: "test-room" });
     assert.equal(f.store.pending("bob"), 100);
     replay.abort.abort();
     f.store.send(actor, { to: "bob", body: "The 101st event" });
@@ -329,10 +332,9 @@ test("large SSE replay gaps request a bounded resync; slow replay consumers keep
       gap.events.filter((event) => event.type === "message").length,
       0,
     );
-    const state = await (await f.request("/api/state", bob)).json();
-    assert.equal(state.messages.length, 100);
-    assert.equal(state.inbox.length, 100);
-    assert.equal(state.pending, 101);
+    assert.equal(f.store.transcript("bob", "test-room").length, 101);
+    assert.equal(f.store.inbox("bob", 100).length, 100);
+    assert.equal(f.store.pending("bob"), 101);
     assert.equal((await f.request("/healthz")).status, 200);
   } finally {
     await f.stop();

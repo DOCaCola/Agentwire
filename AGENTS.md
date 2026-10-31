@@ -5,10 +5,14 @@ unnecessary defensive checks, silent fallbacks, or compatibility shims.
 
 - Device setup and MCP initialization never imply room participation. Only explicit
   join intent creates an active participant; discovery, fan-out, direct sends,
-  history, inboxes and acknowledgments must respect the current room.
+  agent history, inboxes and acknowledgments must respect the current room.
 - Sender identity comes from authentication, never caller-supplied message fields.
 - REST, MCP, dashboard events, history, and acknowledgments must enforce the same
   delivery membership. Owner rights do not bypass directed-message visibility.
+  People read transcripts of messages sent or received by themselves or by agents
+  on devices they approved; this is the only visibility beyond room delivery.
+- Room names belong to the membership and are snapshotted on messages. Show
+  client names and IDs only as details, never as a participant's label.
 - Commit messages and recipient deliveries in one SQLite transaction before
   publishing notifications. Live delivery does not acknowledge processing.
 - Keep the SQLite database on local storage. Do not run multiple relay replicas.

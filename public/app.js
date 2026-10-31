@@ -1,18 +1,19 @@
 const $ = (id) => document.getElementById(id);
 const relayUrl = new URL("../", document.currentScript.src);
+class AuthError extends Error {}
+
 let me,
-  room,
-  desiredRoom,
-  clients = [],
+  membership = null,
+  chats = [],
   devices = [],
-  messages = [],
-  inboxMessages = [],
-  pendingCount = 0,
-  pending = new Set(),
+  selected = null,
+  transcript = [],
   stream,
-  channelFilter = "",
-  replyTo;
-let toastTimer, lastSubmission;
+  replyTo,
+  lastSubmission,
+  joinMode,
+  toastTimer;
+
 const node = (tag, className, text) => {
   const item = document.createElement(tag);
   if (className) item.className = className;
@@ -21,21 +22,26 @@ const node = (tag, className, text) => {
 };
 const initials = (name) =>
   name
-    .split(/[\s·-]+/)
+    .split(/[\s·._-]+/)
     .filter(Boolean)
     .map((part) => part[0])
     .slice(0, 2)
     .join("")
     .toUpperCase();
+const avatar = (name, kind) => node("span", "avatar " + kind, initials(name));
+function formatTime(value, withDay) {
+  const date = new Date(value);
+  const today = date.toDateString() === new Date().toDateString();
+  return today || !withDay
+    ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : date.toLocaleDateString([], { day: "numeric", month: "short" });
+}
 async function api(path, options = {}) {
-  const response = await fetch(new URL(`api${path}`, relayUrl), {
+  const response = await fetch(new URL("api" + path, relayUrl), {
     ...options,
     headers: { "Content-Type": "application/json", ...options.headers },
   });
-  if (response.status === 401) {
-    showLogin();
-    throw new Error("Please sign in again.");
-  }
+  if (response.status === 401) throw new AuthError("Please sign in again.");
   const result = await response.json();
   if (!response.ok) throw new Error(result.error);
   return result;
@@ -44,275 +50,636 @@ function toast(text) {
   $("toast").textContent = text;
   $("toast").hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    $("toast").hidden = true;
-  }, 5000);
+  toastTimer = setTimeout(() => ($("toast").hidden = true), 5000);
 }
-function showLogin() {
+function report(error) {
+  if (error instanceof AuthError) showLogin();
+  else toast(error.message);
+}
+const chat = (room) => chats.find((item) => item.room === room);
+const people = () => chat(selected)?.participants ?? [];
+const joinedHere = () => Boolean(selected && membership?.room === selected);
+
+// ---- Sign-in ----
+const loginUrl = (silent) => {
+  const url = new URL("auth/login", relayUrl);
+  if (location.hash === "#devices") url.searchParams.set("devices", "1");
+  if (silent) url.searchParams.set("prompt", "none");
+  return url.href;
+};
+function showLogin(status) {
   stream?.close();
   stream = undefined;
-  desiredRoom = undefined;
-  $("workspace").hidden = true;
+  $("app").hidden = true;
   $("login").hidden = false;
+  $("login-status").textContent =
+    status ?? "Sign in to follow and join your agents’ chats.";
+  for (const id of ["oidc-login", "token-login"])
+    $(id).classList.toggle("busy", Boolean(status));
 }
-function setConnection(connected) {
-  $("connection").replaceChildren(
-    node("span", "little-dot"),
-    document.createTextNode(connected ? "Live connection" : "Reconnecting"),
-  );
-  $("connection").classList.toggle("offline", !connected);
-}
-function renderClients() {
-  const selected = $("recipient").value;
-  $("clients").replaceChildren();
-  $("recipient").replaceChildren(new Option("Everyone in room", "all"));
-  for (const client of clients) {
-    const row = node("div", "client-row");
-    row.append(node("span", `avatar ${client.kind}`, initials(client.name)));
-    const info = node("div", "client-info");
-    info.append(
-      node("strong", "", client.name),
-      node("small", "", `${client.id}${client.id === me.id ? " · you" : ""}`),
-    );
-    row.append(info);
-    if (client.can_manage && client.id !== "owner") {
-      const actions = node("div", "client-actions");
-      for (const [symbol, title, action] of [
-        ["↻", "Rotate token", "rotate"],
-        ["×", "Revoke client", "revoke"],
-      ]) {
-        if (action === "rotate" && !client.can_rotate) continue;
-        const button = node("button", "icon-button", symbol);
-        button.title = `${title}: ${client.name}`;
-        button.onclick = async () => {
-          if (
-            !confirm(
-              `${title} for ${client.name}? Existing connections will close.`,
-            )
-          )
-            return;
-          try {
-            const result = await api(
-              `/clients/${client.id}${action === "rotate" ? "/rotate" : ""}`,
-              { method: action === "rotate" ? "POST" : "DELETE" },
-            );
-            if (action === "rotate") showCredential(result.token, client.id);
-          } catch (error) {
-            toast(error.message);
-          }
-        };
-        actions.append(button);
-      }
-      row.append(actions);
-    }
-    row.append(
-      node("span", `status-dot ${client.connections ? "online" : ""}`),
-    );
-    $("clients").append(row);
-    if (client.id !== me.id)
-      $("recipient").append(new Option(client.name, client.id));
+$("login-form").onsubmit = async (event) => {
+  event.preventDefault();
+  $("login-error").textContent = "";
+  try {
+    await api("/login", {
+      method: "POST",
+      body: JSON.stringify({ token: $("token").value.trim() }),
+    });
+    $("token").value = "";
+    await start();
+  } catch (error) {
+    $("login-error").textContent = error.message;
   }
-  if ([...$("recipient").options].some((option) => option.value === selected))
-    $("recipient").value = selected;
-  $("online-count").replaceChildren(
-    document.createTextNode(
-      String(clients.filter((client) => client.connections).length),
-    ),
-    node("small", "", "clients online"),
-  );
-}
-function renderMessages() {
-  $("messages").replaceChildren();
-  const combined = new Map(
-    [...inboxMessages, ...messages].map((message) => [message.id, message]),
-  );
-  pending = new Set([...pending].filter((id) => combined.has(id)));
-  const visible = [...combined.values()]
-    .sort((a, b) => a.id - b.id)
-    .filter((message) => !channelFilter || message.channel === channelFilter);
-  for (const message of visible) {
-    const sender = clients.find((client) => client.id === message.sender);
-    const article = node("article", "message");
-    article.dataset.id = String(message.id);
-    article.append(
-      node(
-        "span",
-        `avatar ${sender?.kind ?? "agent"}`,
-        initials(sender?.name ?? message.sender),
-      ),
-    );
-    const content = node("div", "message-content"),
-      head = node("div", "message-head");
-    head.append(
-      node("strong", "", sender?.name ?? message.sender),
-      node("span", `badge ${message.kind}`, message.kind),
-    );
-    const recipient = message.recipient
-      ? (clients.find((client) => client.id === message.recipient)?.name ??
-        message.recipient)
-      : "everyone";
-    head.append(node("span", "message-route", `→ ${recipient}`));
-    const time = node(
-      "time",
-      "",
-      new Date(message.created_at).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      }),
-    );
-    time.dateTime = message.created_at;
-    time.title = new Date(message.created_at).toLocaleString();
-    head.append(time);
-    content.append(head, node("p", "message-body", message.body));
-    const footer = node("div", "message-footer");
-    footer.append(
-      node("span", "", `# ${message.channel}`),
-      node(
-        "span",
-        "",
-        `AW-${message.id}${message.reply_to ? ` · reply to AW-${message.reply_to}` : ""}`,
-      ),
-    );
-    const reply = node("button", "", "Reply ↗");
-    reply.onclick = () => {
-      replyTo = message.id;
-      $("channel").value = message.channel;
-      $("recipient").value =
-        message.sender === me.id
-          ? (message.recipient ?? "all")
-          : message.sender;
-      $("kind").value = "answer";
-      $("reply-info").textContent = ` · replying to AW-${message.id}`;
-      $("body").focus();
-    };
-    footer.append(reply);
-    if (pending.has(message.id)) {
-      const ack = node("button", "pending-mark", "Acknowledge ✓");
-      ack.onclick = async () => {
-        try {
-          await api("/ack", {
-            method: "POST",
-            body: JSON.stringify({ ids: [message.id] }),
-          });
-        } catch (error) {
-          toast(error.message);
-        }
-      };
-      footer.append(ack);
-    }
-    content.append(footer);
-    article.append(content);
-    $("messages").append(article);
+};
+$("logout").onclick = async () => {
+  try {
+    await api("/logout", { method: "POST", body: "{}" });
+    membership = null;
+    showLogin();
+  } catch (error) {
+    report(error);
   }
-  $("empty").hidden = visible.length > 0;
-  $("messages").hidden = !visible.length;
-  $("total-count").textContent =
-    messages.length >= 100 ? "100+" : String(messages.length);
-  $("channel-filter").replaceChildren(new Option("All channels", ""));
-  for (const channel of [
-    ...new Set([...combined.values()].map((message) => message.channel)),
-  ].sort())
-    $("channel-filter").append(new Option(`# ${channel}`, channel));
-  $("channel-filter").value = channelFilter;
-  $("channel-label").textContent = channelFilter
-    ? `/ ${channelFilter}`
-    : "/ all channels";
-}
-function renderPending(count) {
-  pendingCount = count;
-  $("pending-count").replaceChildren(
-    document.createTextNode(String(count)),
-    node("small", "", "unacknowledged"),
-  );
-}
+};
+
+// ---- Loading and live updates ----
 async function load() {
   const state = await api("/state");
   me = state.client;
-  room = state.room;
-  renderRoom(state.rooms);
-  clients = state.clients;
+  membership = state.membership;
+  chats = state.chats;
   devices = state.devices;
-  messages = state.messages;
-  inboxMessages = state.inbox;
-  pending = new Set(state.inbox.map((message) => message.id));
-  $("my-name").textContent = me.name;
-  $("my-id").textContent = me.id;
-  $("my-avatar").textContent = initials(me.name);
-  $("add-client").hidden = !me.admin;
-  $("manage-devices").hidden = me.kind !== "human";
   $("login").hidden = true;
-  $("workspace").hidden = false;
-  renderClients();
-  renderMessages();
-  renderPending(state.pending);
+  $("app").hidden = false;
+  $("my-name").textContent = me.name;
+  $("my-avatar").textContent = initials(me.name);
+  $("open-tokens").hidden = !me.admin;
+  route();
   renderDevices();
+}
+async function start() {
+  await load();
+  connect();
+}
+function connect() {
+  stream?.close();
+  const after = Math.max(
+    0,
+    ...chats.map((item) => item.last?.id ?? 0),
+    ...transcript.map((item) => item.id),
+  );
+  stream = new EventSource(new URL("api/events?after=" + after, relayUrl));
+  let checked = false;
+  stream.onopen = () => {
+    checked = false;
+    setConnection(true);
+    void renewMembership();
+  };
+  stream.onerror = () => {
+    setConnection(false);
+    // One credential check per outage; EventSource reconnects on its own.
+    if (!checked) {
+      checked = true;
+      api("/state").catch((error) => {
+        if (error instanceof AuthError) showLogin();
+      });
+    }
+  };
+  stream.addEventListener("message", (event) =>
+    receive(JSON.parse(event.data)),
+  );
+  stream.addEventListener("clients", (event) => {
+    const data = JSON.parse(event.data);
+    membership = data.membership;
+    chats = data.chats;
+    renderChats();
+    renderConversation();
+  });
+  stream.addEventListener("devices", (event) => {
+    devices = JSON.parse(event.data);
+    renderDevices();
+  });
+  stream.addEventListener("resync", () => start().catch(report));
+}
+function setConnection(live) {
+  $("connection").classList.toggle("offline", !live);
+  $("connection").title = live ? "Live" : "Reconnecting…";
+  $("connection").textContent = live ? "" : "Reconnecting…";
+}
+function receive(message) {
+  const existing = chat(message.room);
+  if (existing) existing.last = message;
+  else chats.push({ room: message.room, participants: [], last: message });
+  chats.sort(
+    (a, b) =>
+      (b.last?.id ?? Infinity) - (a.last?.id ?? Infinity) ||
+      a.room.localeCompare(b.room),
+  );
+  renderChats();
   if (
-    location.hash === "#devices" &&
-    me.kind === "human" &&
-    !$("devices-dialog").open
-  )
+    message.room === selected &&
+    !transcript.some((item) => item.id === message.id)
+  ) {
+    transcript.push(message);
+    renderMessages(true);
+  }
+}
+async function renewMembership() {
+  if (!membership) return;
+  try {
+    await api("/rooms/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({ room: membership.room }),
+    });
+  } catch (error) {
+    if (error instanceof AuthError) return showLogin();
+    membership = null;
+    renderConversation();
+  }
+}
+setInterval(() => void renewMembership(), 20_000);
+
+// ---- Navigation ----
+function route() {
+  const match = /^#chat=(.+)$/.exec(location.hash);
+  const room = match ? decodeURIComponent(match[1]) : null;
+  if (room !== selected) {
+    selected = room;
+    transcript = [];
+    replyTo = undefined;
+    if (room) void openTranscript(room);
+  }
+  $("app").classList.toggle("in-chat", Boolean(selected));
+  renderChats();
+  renderConversation();
+  if (location.hash === "#devices" && !$("devices-dialog").open)
     $("devices-dialog").showModal();
 }
-function renderDevices() {
-  $("device-count").textContent = String(
-    devices.filter((device) => device.status === "pending").length,
+async function openTranscript(room) {
+  try {
+    const messages = await api(
+      "/rooms/" + encodeURIComponent(room) + "/messages",
+    );
+    if (selected !== room) return;
+    const live = transcript.filter(
+      (item) => item.id > (messages.at(-1)?.id ?? 0),
+    );
+    transcript = [...messages, ...live];
+    renderMessages(true);
+  } catch (error) {
+    report(error);
+  }
+}
+const select = (room) => {
+  location.hash = room ? "chat=" + encodeURIComponent(room) : "";
+};
+window.addEventListener("hashchange", () => me && route());
+$("back").onclick = () => select(null);
+
+// ---- Chat list ----
+function renderChats() {
+  const list = $("chat-list");
+  list.replaceChildren();
+  for (const item of chats) {
+    const button = node("button", "chat-item");
+    if (item.room === selected) button.setAttribute("aria-current", "true");
+    button.onclick = () => select(item.room);
+    const top = node("span", "chat-top");
+    top.append(node("strong", "", item.room));
+    if (item.last) {
+      const time = node("time", "", formatTime(item.last.created_at, true));
+      time.dateTime = item.last.created_at;
+      top.append(time);
+    }
+    const bottom = node("span", "chat-bottom");
+    bottom.append(
+      node(
+        "span",
+        "preview",
+        item.last
+          ? item.last.sender_name + ": " + item.last.body
+          : "No messages yet",
+      ),
+    );
+    if (item.participants.length)
+      bottom.append(node("span", "present", String(item.participants.length)));
+    button.append(top, bottom);
+    list.append(button);
+  }
+  $("no-chats").hidden = chats.length > 0;
+}
+
+// ---- Conversation ----
+function renderConversation() {
+  const current = chat(selected);
+  const count = people().length;
+  $("chat-title").textContent = selected ?? "Chats";
+  $("chat-subtitle").textContent = selected
+    ? [
+        count
+          ? count + (count === 1 ? " person here" : " people here")
+          : "Nobody here now",
+        joinedHere() ? "you’re in this chat" : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
+  $("toggle-people").hidden = !selected;
+  $("compose-area").hidden = !selected;
+  $("join-bar").hidden = joinedHere();
+  $("composer").hidden = !joinedHere();
+  $("join-text").textContent =
+    membership && membership.room !== selected
+      ? "You’re in " + membership.room + ". Joining moves you here."
+      : "Join to write in this chat.";
+  renderPeople();
+  renderRecipients();
+  if (!selected) {
+    placeholder(
+      chats.length ? "Pick a chat" : "No chats yet",
+      chats.length
+        ? "Choose a chat on the left to read along."
+        : "Ask an agent to “join room MyTask”. Its chat shows up here as soon as it joins.",
+    );
+  } else if (!current && !transcript.length) {
+    placeholder(
+      "Nobody here yet",
+      "Agents that join “" + selected + "” appear here.",
+    );
+  } else renderMessages(false);
+}
+function placeholder(title, text) {
+  $("messages").hidden = true;
+  $("placeholder").hidden = false;
+  $("placeholder-title").textContent = title;
+  $("placeholder-text").textContent = text;
+}
+function renderMessages(scroll) {
+  if (!selected) return;
+  const box = $("messages");
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  if (!transcript.length) {
+    placeholder(
+      "No messages yet",
+      "Messages that you or your agents send or receive here appear in this chat.",
+    );
+    return;
+  }
+  $("placeholder").hidden = true;
+  box.hidden = false;
+  box.replaceChildren();
+  let previous;
+  let day;
+  for (const message of transcript) {
+    const date = new Date(message.created_at).toDateString();
+    if (date !== day) {
+      day = date;
+      box.append(
+        node(
+          "div",
+          "day",
+          new Date(message.created_at).toLocaleDateString([], {
+            weekday: "long",
+            day: "numeric",
+            month: "long",
+          }),
+        ),
+      );
+      previous = undefined;
+    }
+    const continued =
+      previous &&
+      previous.sender === message.sender &&
+      previous.recipient === message.recipient &&
+      !message.reply_to &&
+      new Date(message.created_at) - new Date(previous.created_at) < 5 * 60_000;
+    box.append(renderMessage(message, continued));
+    previous = message;
+  }
+  if (scroll || nearBottom) box.scrollTop = box.scrollHeight;
+}
+function renderMessage(message, continued) {
+  const sender = people().find((item) => item.id === message.sender);
+  const article = node("article", "message" + (continued ? " continued" : ""));
+  if (message.sender === me.id) article.classList.add("mine");
+  article.append(
+    continued
+      ? node("span", "gutter")
+      : avatar(
+          message.sender_name,
+          sender?.kind ?? (message.sender === me.id ? "human" : "agent"),
+        ),
   );
-  $("devices-list").replaceChildren();
+  const content = node("div", "message-content");
+  if (!continued) {
+    const head = node("div", "message-head");
+    head.append(node("strong", "", message.sender_name));
+    if (message.recipient)
+      head.append(node("span", "direct", "to " + message.recipient_name));
+    if (
+      message.kind !== "note" &&
+      !(message.kind === "answer" && message.reply_to)
+    )
+      head.append(node("span", "badge " + message.kind, message.kind));
+    const time = node("time", "", formatTime(message.created_at));
+    time.dateTime = message.created_at;
+    time.title = new Date(message.created_at).toLocaleString();
+    head.append(time);
+    content.append(head);
+  }
+  if (message.reply_to) {
+    const parent = transcript.find((item) => item.id === message.reply_to);
+    if (parent)
+      content.append(
+        node("p", "quote", parent.sender_name + ": " + parent.body),
+      );
+  }
+  content.append(node("p", "body", message.body));
+  article.append(content);
+  if (joinedHere() && message.sender !== me.id) {
+    const reply = node("button", "reply", "Reply");
+    reply.onclick = () => {
+      replyTo = message;
+      const present = people().some((item) => item.id === message.sender);
+      $("recipient").value = present ? message.sender : "all";
+      renderReply();
+      $("body").focus();
+    };
+    article.append(reply);
+  }
+  return article;
+}
+function renderRecipients() {
+  const chosen = $("recipient").value;
+  const others = people().filter((item) => item.id !== me?.id);
+  $("recipient").replaceChildren(new Option("Everyone", "all"));
+  for (const item of others) {
+    const twin = others.some(
+      (other) => other !== item && other.name === item.name,
+    );
+    $("recipient").append(
+      new Option(
+        twin ? item.name + " (" + item.client_name + ")" : item.name,
+        item.id,
+      ),
+    );
+  }
+  $("recipient").value = others.some((item) => item.id === chosen)
+    ? chosen
+    : "all";
+}
+function renderReply() {
+  $("reply-chip").hidden = !replyTo;
+  $("reply-text").textContent = replyTo
+    ? "Replying to " + replyTo.sender_name + ": " + replyTo.body
+    : "";
+}
+$("cancel-reply").onclick = () => {
+  replyTo = undefined;
+  renderReply();
+};
+$("composer").onsubmit = async (event) => {
+  event.preventDefault();
+  const button = $("composer").querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    const draft = {
+      to: $("recipient").value,
+      body: $("body").value,
+      ...(replyTo ? { kind: "answer", reply_to: replyTo.id } : {}),
+    };
+    const serialized = JSON.stringify(draft);
+    if (lastSubmission?.serialized !== serialized)
+      lastSubmission = { serialized, key: crypto.randomUUID() };
+    await api("/messages", {
+      method: "POST",
+      body: JSON.stringify({ ...draft, idempotency_key: lastSubmission.key }),
+    });
+    lastSubmission = undefined;
+    replyTo = undefined;
+    $("body").value = "";
+    resizeBody();
+    renderReply();
+  } catch (error) {
+    report(error);
+  } finally {
+    button.disabled = false;
+  }
+};
+function resizeBody() {
+  $("body").style.height = "auto";
+  $("body").style.height = $("body").scrollHeight + "px";
+}
+$("body").oninput = resizeBody;
+$("body").onkeydown = (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    $("composer").requestSubmit();
+  }
+};
+
+// ---- People ----
+function renderPeople() {
+  const list = $("people");
+  list.replaceChildren();
+  for (const item of people()) {
+    const row = node("li");
+    const button = node("button", "person");
+    const face = avatar(item.name, item.kind);
+    face.append(node("span", "presence" + (item.connections ? " online" : "")));
+    button.append(face, node("span", "person-name", item.name));
+    if (item.id === me.id) button.append(node("span", "tag", "you"));
+    else if (item.kind === "human")
+      button.append(node("span", "tag", "person"));
+    button.onclick = () => openPerson(item);
+    row.append(button);
+    list.append(row);
+  }
+  $("no-people").hidden = !selected || people().length > 0;
+  $("me-in-chat").hidden = !joinedHere();
+  $("my-room-name").textContent = membership?.name ?? "";
+}
+let person;
+function openPerson(item) {
+  person = item;
+  $("person-name").textContent = item.name;
+  $("person-kind").textContent = item.kind === "human" ? "Person" : "Agent";
+  $("person-client").textContent = item.client_name;
+  $("person-status").textContent = item.connections ? "Connected" : "Away";
+  $("person-error").textContent = "";
+  $("person-message").hidden = !joinedHere() || item.id === me.id;
+  $("person-rotate").hidden = !item.can_rotate;
+  $("person-revoke").hidden = !item.can_manage;
+  $("person-dialog").showModal();
+}
+$("person-message").onclick = () => {
+  $("recipient").value = person.id;
+  $("person-dialog").close();
+  $("body").focus();
+};
+$("person-rotate").onclick = async () => {
+  if (
+    !confirm(
+      "Issue a new token for " + person.name + "? The old one stops working.",
+    )
+  )
+    return;
+  try {
+    const result = await api("/clients/" + person.id + "/rotate", {
+      method: "POST",
+    });
+    $("person-dialog").close();
+    showCredential(result.token);
+  } catch (error) {
+    $("person-error").textContent = error.message;
+  }
+};
+$("person-revoke").onclick = async () => {
+  if (!confirm("Revoke " + person.name + "? It is disconnected immediately."))
+    return;
+  try {
+    await api("/clients/" + person.id, { method: "DELETE" });
+    $("person-dialog").close();
+  } catch (error) {
+    $("person-error").textContent = error.message;
+  }
+};
+$("toggle-people").onclick = () => $("app").classList.toggle("people-hidden");
+$("close-people").onclick = () => $("app").classList.add("people-hidden");
+if (matchMedia("(max-width: 1099px)").matches)
+  $("app").classList.add("people-hidden");
+
+// ---- Joining, renaming, leaving ----
+function openJoin(mode) {
+  joinMode = mode;
+  const titles = {
+    new: "New chat",
+    join: "Join " + selected,
+    rename: "Rename yourself",
+  };
+  $("join-title").textContent = titles[mode];
+  $("room-field").hidden = mode !== "new";
+  $("join-room").required = mode === "new";
+  $("join-room").value = "";
+  $("join-name").value =
+    mode === "rename" || membership?.room === selected
+      ? (membership?.name ?? me.name)
+      : me.name;
+  $("join-submit").textContent = mode === "rename" ? "Save" : "Join";
+  $("join-error").textContent = "";
+  updateJoinHint();
+  $("join-dialog").showModal();
+  (mode === "new" ? $("join-room") : $("join-name")).focus();
+}
+function updateJoinHint() {
+  const room = joinMode === "new" ? $("join-room").value.trim() : selected;
+  $("join-hint").textContent =
+    joinMode === "new" && room
+      ? "Agents join with: “Join room " + room + "”"
+      : "";
+}
+$("join-room").oninput = updateJoinHint;
+$("new-chat").onclick = () => openJoin("new");
+$("join-chat").onclick = () => openJoin("join");
+$("rename").onclick = () => openJoin("rename");
+$("join-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const room = joinMode === "new" ? $("join-room").value.trim() : selected;
+  try {
+    const joined = await api("/rooms/join", {
+      method: "POST",
+      body: JSON.stringify({ room, name: $("join-name").value.trim() }),
+    });
+    membership = { room: joined.room, name: joined.name, active: true };
+    $("join-dialog").close();
+    if (selected === joined.room) renderConversation();
+    else select(joined.room);
+  } catch (error) {
+    $("join-error").textContent = error.message;
+  }
+};
+$("leave").onclick = async () => {
+  try {
+    await api("/rooms/leave", { method: "POST", body: "{}" });
+    membership = null;
+    renderConversation();
+  } catch (error) {
+    report(error);
+  }
+};
+
+// ---- Devices ----
+function renderDevices() {
+  const waiting = devices.filter(
+    (device) => device.status === "pending",
+  ).length;
+  $("device-notice").hidden = !waiting;
+  $("device-notice").textContent =
+    waiting === 1
+      ? "1 device is waiting for approval"
+      : waiting + " devices are waiting for approval";
+  $("open-devices").textContent = waiting
+    ? "Devices (" + waiting + ")"
+    : "Devices";
+  const list = $("devices-list");
+  list.replaceChildren();
   if (!devices.length)
-    $("devices-list").append(
+    list.append(
       node(
         "p",
         "muted",
-        "No devices yet. Run agentwire setup on the device you want to connect.",
+        "No devices. Set up the Agentwire plugin on a device to connect it.",
       ),
     );
   for (const device of devices) {
-    const card = node("section", "device-card");
-    card.append(
-      node("h3", "", device.name),
+    const form = node("form", "device");
+    const info = node("div", "device-info");
+    info.append(
+      node("strong", "", device.name),
       node(
-        "p",
-        "muted",
-        `${device.status} · fingerprint ${device.fingerprint}`,
+        "small",
+        "",
+        (device.status === "pending" ? "Waiting for approval" : "Approved") +
+          " · fingerprint " +
+          device.fingerprint,
       ),
     );
-    const form = node("form", "device-actions");
+    form.append(info);
+    const actions = node("div", "device-actions");
     if (device.status === "pending") {
       const code = node("input");
       code.name = "code";
-      code.placeholder = "Approval code";
+      code.placeholder = "Code";
       code.autocomplete = "off";
       code.maxLength = 9;
-      code.setAttribute("aria-label", `Approval code for ${device.name}`);
-      form.append(code);
+      code.required = true;
+      code.setAttribute("aria-label", "Approval code for " + device.name);
+      actions.append(code);
     }
-    for (const action of device.status === "pending"
-      ? ["approve", "deny"]
-      : ["revoke"]) {
-      const button = node(
-        "button",
-        action === "approve" ? "primary" : "secondary",
-        action === "approve"
-          ? "Approve"
-          : action === "deny"
-            ? "Deny"
-            : "Revoke device",
-      );
-      button.type = "submit";
+    const buttons =
+      device.status === "pending"
+        ? [
+            ["approve", "Approve", "primary"],
+            ["deny", "Deny", ""],
+          ]
+        : [["revoke", "Revoke", "danger"]];
+    for (const [action, label, style] of buttons) {
+      const button = node("button", "button small " + style, label);
       button.value = action;
-      form.append(button);
+      if (action === "deny") button.formNoValidate = true;
+      actions.append(button);
     }
+    form.append(actions);
     form.onsubmit = async (event) => {
       event.preventDefault();
       const action = event.submitter.value;
       if (
         action === "revoke" &&
-        !confirm(`Revoke ${device.name} and all its agent credentials?`)
+        !confirm("Revoke " + device.name + " and all its agents?")
       )
         return;
       $("device-error").textContent = "";
       try {
-        await api(`/devices/${device.id}`, {
+        await api("/devices/" + device.id, {
           method: "POST",
           body: JSON.stringify({
             action,
@@ -332,225 +699,36 @@ function renderDevices() {
         $("device-error").textContent = error.message;
       }
     };
-    card.append(form);
-    $("devices-list").append(card);
+    list.append(form);
   }
 }
-$("manage-devices").onclick = async () => {
-  try {
-    devices = await api("/devices");
-    renderDevices();
-    $("devices-dialog").showModal();
-  } catch (error) {
-    toast(error.message);
-  }
+const openDevices = () => {
+  $("device-error").textContent = "";
+  $("devices-dialog").showModal();
 };
-$("close-devices").onclick = () => $("devices-dialog").close();
-function connect() {
-  stream?.close();
-  let authChecked = false;
-  stream = new EventSource(
-    new URL(`api/events?after=${messages.at(-1)?.id ?? 0}`, relayUrl),
-  );
-  stream.onopen = () => {
-    authChecked = false;
-    setConnection(true);
-    void renewPresence();
-  };
-  stream.onerror = () => {
-    setConnection(false);
-    // One credential check on disconnection; EventSource owns reconnecting the live stream.
-    if (!authChecked) {
-      authChecked = true;
-      api("/state").catch(() => {});
-    }
-  };
-  stream.addEventListener("message", (event) => {
-    const message = JSON.parse(event.data);
-    if (message.room !== room) return;
-    if (!messages.some((item) => item.id === message.id)) {
-      messages.push(message);
-      messages = messages.slice(-100);
-      if (message.sender !== me.id) {
-        pending.add(message.id);
-        renderPending(pendingCount + 1);
-      }
-      renderMessages();
-    }
-  });
-  stream.addEventListener("clients", (event) => {
-    const data = JSON.parse(event.data);
-    const previous = room;
-    room = data.room;
-    clients = data.participants;
-    renderRoom(data.rooms);
-    renderClients();
-    if (previous !== room) void load().catch((error) => toast(error.message));
-  });
-  stream.addEventListener("devices", (event) => {
-    devices = JSON.parse(event.data);
-    renderDevices();
-  });
-  stream.addEventListener("inbox", (event) => {
-    const data = JSON.parse(event.data);
-    inboxMessages = data.inbox;
-    pending = new Set(data.inbox.map((message) => message.id));
-    renderPending(data.pending);
-    renderMessages();
-  });
-  stream.addEventListener("resync", async () => {
-    try {
-      await load();
-      connect();
-    } catch (error) {
-      toast(error.message);
-    }
-  });
-}
-function renderRoom(rooms) {
-  $("room-status").textContent = room
-    ? `Joined ${room}`
-    : "Join a room to collaborate.";
-  $("leave-room").hidden = !room && !desiredRoom;
-  $("room-options").replaceChildren(
-    ...rooms.map(
-      (item) =>
-        new Option(
-          `${item.room} · ${item.participants} participants`,
-          item.room,
-        ),
-    ),
-  );
-  for (const control of $("composer").elements) control.disabled = !room;
-  $("feed-description").textContent = room ? `Room: ${room}` : "No room joined";
-}
-async function renewPresence() {
-  if (!desiredRoom) return;
-  try {
-    await api("/rooms/heartbeat", {
-      method: "POST",
-      body: JSON.stringify({ room: desiredRoom }),
-    });
-  } catch (error) {
-    toast(error.message);
-  }
-}
-setInterval(() => void renewPresence(), 20_000);
-$("room-form").onsubmit = async (event) => {
-  event.preventDefault();
-  try {
-    const joined = await api("/rooms/join", {
-      method: "POST",
-      body: JSON.stringify({ room: $("room-name").value }),
-    });
-    desiredRoom = joined.room;
-    replyTo = undefined;
-    lastSubmission = undefined;
-    $("reply-info").textContent = "";
-    channelFilter = "";
-    await load();
-  } catch (error) {
-    toast(error.message);
-  }
-};
-$("leave-room").onclick = async () => {
-  try {
-    await api("/rooms/leave", { method: "POST", body: "{}" });
-    desiredRoom = undefined;
-    await load();
-  } catch (error) {
-    toast(error.message);
-  }
-};
-$("login-form").onsubmit = async (event) => {
-  event.preventDefault();
-  $("login-error").textContent = "";
-  try {
-    await api("/login", {
-      method: "POST",
-      body: JSON.stringify({ token: $("token").value.trim() }),
-    });
-    $("token").value = "";
-    await load();
-    connect();
-  } catch (error) {
-    $("login-error").textContent = error.message;
-  }
-};
-$("logout").onclick = async () => {
-  try {
-    await api("/logout", { method: "POST", body: "{}" });
-    showLogin();
-  } catch (error) {
-    toast(error.message);
-  }
-};
-$("channel-filter").onchange = () => {
-  channelFilter = $("channel-filter").value;
-  renderMessages();
-};
-$("all-filter").onclick = () => {
-  channelFilter = "";
-  renderMessages();
-};
-$("composer").onsubmit = async (event) => {
-  event.preventDefault();
-  const button =
-    event.submitter ?? $("composer").querySelector("button[type=submit]");
-  button.disabled = true;
-  try {
-    const draft = {
-      to: $("recipient").value,
-      channel: $("channel").value,
-      kind: $("kind").value,
-      body: $("body").value,
-      ...(replyTo ? { reply_to: replyTo } : {}),
-    };
-    const serialized = JSON.stringify(draft);
-    if (lastSubmission?.serialized !== serialized) {
-      lastSubmission = { serialized, key: crypto.randomUUID() };
-    }
-    await api("/messages", {
-      method: "POST",
-      body: JSON.stringify({
-        ...draft,
-        idempotency_key: lastSubmission.key,
-      }),
-    });
-    lastSubmission = undefined;
-    $("body").value = "";
-    replyTo = undefined;
-    $("reply-info").textContent = "";
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = !room;
-  }
-};
-$("body").onkeydown = (event) => {
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    $("composer").requestSubmit();
-  }
-};
-$("add-client").onclick = () => {
+$("open-devices").onclick = openDevices;
+$("device-notice").onclick = openDevices;
+$("devices-dialog").addEventListener("close", () => {
+  if (location.hash === "#devices")
+    history.replaceState(null, "", location.pathname);
+});
+
+// ---- Access tokens ----
+$("open-tokens").onclick = () => {
   $("client-form").hidden = false;
   $("credential").hidden = true;
   $("client-error").textContent = "";
   $("client-form").reset();
-  $("client-dialog").showModal();
+  $("tokens-dialog").showModal();
 };
-function showCredential(token, id) {
+function showCredential(token) {
   $("client-form").hidden = true;
   $("credential").hidden = false;
   $("new-token").textContent = token;
-  $("new-config").textContent =
-    `[mcp_servers.agentwire]\ncommand = "node"\nargs = ["/absolute/path/to/Agentwire/dist/adapter.js"]\nchannel = true\nenv_vars = ["AGENTWIRE_TOKEN"]\n\n[mcp_servers.agentwire.env]\nAGENTWIRE_URL = "${relayUrl.href}"\n\n# Build Agentwire locally with npm ci && npm run build.\n# Set AGENTWIRE_TOKEN to this client's token (${id}).`;
-  if (!$("client-dialog").open) $("client-dialog").showModal();
+  if (!$("tokens-dialog").open) $("tokens-dialog").showModal();
 }
 $("client-form").onsubmit = async (event) => {
   event.preventDefault();
-  $("client-error").textContent = "";
   try {
     const data = await api("/clients", {
       method: "POST",
@@ -560,7 +738,7 @@ $("client-form").onsubmit = async (event) => {
         kind: $("client-kind").value,
       }),
     });
-    showCredential(data.token, data.client.id);
+    showCredential(data.token);
   } catch (error) {
     $("client-error").textContent = error.message;
   }
@@ -568,29 +746,36 @@ $("client-form").onsubmit = async (event) => {
 $("copy-token").onclick = async () => {
   try {
     await navigator.clipboard.writeText($("new-token").textContent);
-    toast("Token copied. Store it securely.");
+    toast("Token copied.");
   } catch {
-    toast("Select and copy the token manually.");
+    toast("Select the token and copy it manually.");
   }
 };
-for (const button of document.querySelectorAll(".close-dialog"))
-  button.onclick = () => $("client-dialog").close();
-$("client-dialog").addEventListener("close", () => {
+$("tokens-dialog").addEventListener("close", () => {
   $("new-token").textContent = "";
-  $("new-config").textContent = "";
 });
-api("/auth")
-  .then((auth) => {
-    $("oidc-login").hidden = !auth.oidc;
-    $("oidc-login").textContent = `Sign in with ${auth.label}`;
-    if (location.hash === "#devices")
-      $("oidc-login").href = new URL("auth/login?devices=1", relayUrl).href;
-    $("token-login").open = !auth.oidc;
-  })
-  .catch((error) => {
-    $("login-error").textContent = error.message;
-    $("token-login").open = true;
-  });
-load()
-  .then(connect)
-  .catch(() => showLogin());
+for (const button of document.querySelectorAll("[data-close]"))
+  button.onclick = () => button.closest("dialog").close();
+
+// ---- Start ----
+(async () => {
+  const query = new URLSearchParams(location.search);
+  const manual = query.has("signin");
+  if (manual) history.replaceState(null, "", location.pathname + location.hash);
+  const auth = await api("/auth");
+  $("oidc-login").hidden = !auth.oidc;
+  $("oidc-login").textContent = "Sign in with " + auth.label;
+  $("oidc-login").href = loginUrl(false);
+  $("token-login").open = !auth.oidc;
+  try {
+    await start();
+  } catch (error) {
+    if (!(error instanceof AuthError)) {
+      showLogin();
+      $("login-error").textContent = error.message;
+    } else if (auth.automatic && !manual) {
+      showLogin("Signing in…");
+      location.replace(loginUrl(true));
+    } else showLogin();
+  }
+})();

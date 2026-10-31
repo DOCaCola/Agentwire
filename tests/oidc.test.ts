@@ -18,7 +18,9 @@ test("OpenID login validates PKCE, browser state, nonce, issuer, audience, signa
   };
   let issuer = "",
     username = "Alice",
-    groups = ["Agentwire Users", "Agentwire Admins"];
+    groups = ["Agentwire Users", "Agentwire Admins"],
+    providerSession = true,
+    prompt: string | null = null;
   let corrupt: "" | "nonce" | "audience" | "issuer" | "signature" = "";
   const codes = new Map<
     string,
@@ -46,16 +48,22 @@ test("OpenID login validates PKCE, browser state, nonce, issuer, audience, signa
     else if (url.pathname === "/authorize") {
       assert.equal(url.searchParams.get("code_challenge_method"), "S256");
       assert.equal(url.searchParams.get("scope"), "openid profile email");
-      const code = randomUUID();
+      prompt = url.searchParams.get("prompt");
       const redirect = url.searchParams.get("redirect_uri")!;
+      const callback = new URL(redirect);
+      callback.searchParams.set("state", url.searchParams.get("state")!);
+      if (prompt === "none" && !providerSession) {
+        callback.searchParams.set("error", "login_required");
+        res.writeHead(302, { Location: callback.href }).end();
+        return;
+      }
+      const code = randomUUID();
       codes.set(code, {
         nonce: url.searchParams.get("nonce")!,
         challenge: url.searchParams.get("code_challenge")!,
         redirect,
       });
-      const callback = new URL(redirect);
       callback.searchParams.set("code", code);
-      callback.searchParams.set("state", url.searchParams.get("state")!);
       res.writeHead(302, { Location: callback.href }).end();
     } else if (url.pathname === "/token") {
       let body = "";
@@ -130,8 +138,10 @@ test("OpenID login validates PKCE, browser state, nonce, issuer, audience, signa
         { execute: [oidc.allowInsecureRequests] },
       ),
   });
-  async function start() {
-    const login = await fetch(f.url + "/auth/login", { redirect: "manual" });
+  async function start(query = "") {
+    const login = await fetch(f.url + "/auth/login" + query, {
+      redirect: "manual",
+    });
     assert.equal(login.status, 302);
     assert.match(login.headers.get("set-cookie")!, /HttpOnly/);
     assert.match(login.headers.get("set-cookie")!, /SameSite=Lax/);
@@ -153,8 +163,10 @@ test("OpenID login validates PKCE, browser state, nonce, issuer, audience, signa
     assert.deepEqual(await (await fetch(f.url + "/api/auth")).json(), {
       oidc: true,
       label: "OpenID Connect",
+      automatic: true,
     });
     const flow = await start();
+    assert.equal(prompt, null);
     assert.equal((await fetch(flow.url, { redirect: "manual" })).status, 400);
     const signedIn = await finish(flow);
     assert.equal(signedIn.status, 302);
@@ -172,6 +184,45 @@ test("OpenID login validates PKCE, browser state, nonce, issuer, audience, signa
     assert.equal(state.client.name, "Alice");
     assert.notEqual(state.client.id, "owner");
     assert.equal((await finish(flow)).status, 400, "callback is single use");
+    const silent = await finish(await start("?prompt=none"));
+    assert.equal(prompt, "none");
+    assert.equal(silent.headers.get("location"), "/relay/ui/");
+    providerSession = false;
+    const declined = await finish(await start("?prompt=none&devices=1"));
+    assert.equal(
+      declined.headers.get("location"),
+      "/relay/ui/?signin=1#devices",
+    );
+    assert.ok(
+      !declined.headers
+        .getSetCookie()
+        .some((value) => value.startsWith("agentwire=")),
+    );
+    providerSession = true;
+    const signedOut = await fetch(f.url + "/api/logout", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const manual = signedOut.headers
+      .getSetCookie()
+      .find((value) => value.startsWith("agentwire-manual="))!
+      .split(";")[0]!;
+    assert.equal(
+      (
+        await (
+          await fetch(f.url + "/api/auth", { headers: { Cookie: manual } })
+        ).json()
+      ).automatic,
+      false,
+      "signing out stops automatic sign-in",
+    );
+    assert.ok(
+      (await finish(await start())).headers
+        .getSetCookie()
+        .some((value) => value.startsWith("agentwire-manual=;")),
+      "signing in again restores automatic sign-in",
+    );
     const mismatch = await start();
     mismatch.url = mismatch.url.replace(/state=[^&]+/, "state=wrong");
     assert.equal((await finish(mismatch)).status, 400);

@@ -15,27 +15,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 
 /** Enrollment credentials can enroll agents, but cannot read or send messages. */
 export class IdentityStore {
-  constructor(private store: Store) {
-    store.db.exec(`
-      CREATE TABLE IF NOT EXISTS oidc_accounts (
-        issuer TEXT NOT NULL, subject TEXT NOT NULL,
-        client_id TEXT NOT NULL UNIQUE REFERENCES clients(id),
-        PRIMARY KEY (issuer, subject)
-      );
-      CREATE TABLE IF NOT EXISTS devices (
-        id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
-        user_code TEXT NOT NULL, status TEXT NOT NULL,
-        owner_id TEXT REFERENCES clients(id), expires_at INTEGER NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-      );
-      CREATE TABLE IF NOT EXISTS device_clients (
-        device_id TEXT NOT NULL REFERENCES devices(id),
-        session_key TEXT NOT NULL, client_id TEXT NOT NULL UNIQUE REFERENCES clients(id),
-        PRIMARY KEY (device_id, session_key)
-      );
-
-    `);
-  }
+  constructor(private store: Store) {}
   human(issuer: string, subject: string, name: string, admin: boolean): Client {
     const account = this.store.db
       .prepare(

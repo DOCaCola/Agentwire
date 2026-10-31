@@ -8,10 +8,22 @@ import type {
   NextFunction,
 } from "express";
 import { z } from "zod";
-import { Store, Problem, hashToken, type Client } from "./store.js";
+import {
+  Store,
+  Problem,
+  hashToken,
+  type Client,
+  type Message,
+  type Participant,
+} from "./store.js";
 import { Hub } from "./hub.js";
 import { McpEndpoint } from "./mcp.js";
-import { ackSchema, inboxSchema, joinSchema } from "./protocol.js";
+import {
+  ackSchema,
+  heartbeatSchema,
+  inboxSchema,
+  roomName,
+} from "./protocol.js";
 import { eventStream } from "./sse.js";
 import { relayUrl } from "./url.js";
 import { IdentityStore } from "./identity.js";
@@ -68,6 +80,14 @@ export function createAgentwire(options: Options) {
       ? "__Secure-agentwire"
       : "__Host-agentwire"
     : "agentwire";
+  // Set by an explicit sign-out so the dashboard stops signing in through the OpenID provider.
+  const manualCookie = cookieName + "-manual";
+  const readCookie = (req: Request, name: string) =>
+    req.headers.cookie
+      ?.split(";")
+      .map((value) => value.trim())
+      .find((value) => value.startsWith(`${name}=`))
+      ?.slice(name.length + 1);
   const login = (client: Client, res: Response) => {
     if (sessions.size >= 1000)
       throw new Problem(429, "Browser session limit reached");
@@ -77,6 +97,7 @@ export function createAgentwire(options: Options) {
       expires: Date.now() + 12 * 60 * 60_000,
     });
     res.cookie(cookieName, key, { ...cookieOptions, maxAge: 12 * 60 * 60_000 });
+    res.clearCookie(manualCookie, cookieOptions);
   };
   const oidc = options.oidc
     ? configureOidc(app, options.oidc, publicUrl, identities, login, () =>
@@ -92,11 +113,7 @@ export function createAgentwire(options: Options) {
       if (header?.startsWith("Bearer "))
         client = store.authenticate(header.slice(7));
       else if (!bearerOnly) {
-        const cookie = req.headers.cookie
-          ?.split(";")
-          .map((value) => value.trim())
-          .find((value) => value.startsWith(`${cookieName}=`));
-        const key = cookie?.slice(cookieName.length + 1);
+        const key = readCookie(req, cookieName);
         const session = key ? sessions.get(hashToken(key)) : undefined;
         if (session && session.expires > Date.now()) {
           client = store.client(session.client);
@@ -140,10 +157,11 @@ export function createAgentwire(options: Options) {
     store.db.prepare("SELECT 1").get();
     res.json({ status: "ok" });
   });
-  app.get("/api/auth", (_req, res) => {
+  app.get("/api/auth", (req, res) => {
     res.json({
       oidc: Boolean(options.oidc),
       label: options.oidc?.label ?? "OpenID Connect",
+      automatic: Boolean(options.oidc) && !readCookie(req, manualCookie),
     });
   });
   app.post("/api/enrollment", (req, res) => {
@@ -203,48 +221,85 @@ export function createAgentwire(options: Options) {
   });
   app.use("/api", authenticate(false));
   app.post("/api/logout", (req, res) => {
-    const cookie = req.headers.cookie
-      ?.split(";")
-      .map((value) => value.trim())
-      .find((value) => value.startsWith(`${cookieName}=`));
-    if (cookie) sessions.delete(hashToken(cookie.slice(cookieName.length + 1)));
-    res.clearCookie(cookieName, cookieOptions).json({ ok: true });
+    const key = readCookie(req, cookieName);
+    if (key) sessions.delete(hashToken(key));
+    res
+      .clearCookie(cookieName, cookieOptions)
+      .cookie(manualCookie, "1", {
+        ...cookieOptions,
+        maxAge: 30 * 24 * 60 * 60_000,
+      })
+      .json({ ok: true });
   });
-  const clients = (viewer: Client) =>
-    store.participants(viewer.id).map((client) => ({
-      ...client,
-      connections: hub.online(client.id),
+  const people = (viewer: Client, participants: Participant[]) =>
+    participants.map((participant) => ({
+      ...participant,
+      connections: hub.online(participant.id),
       can_manage:
-        viewer.kind === "human" && identities.owned(viewer, client.id),
+        viewer.kind === "human" &&
+        participant.id !== "owner" &&
+        identities.owned(viewer, participant.id),
       can_rotate: Boolean(
         viewer.admin &&
-        !identities.isOidc(client.id) &&
-        !identities.isDeviceClient(client.id),
+        participant.id !== "owner" &&
+        !identities.isOidc(participant.id) &&
+        !identities.isDeviceClient(participant.id),
       ),
     }));
+  /** A person's chats: every active room plus rooms with messages visible to them, newest first. */
+  const chats = (viewer: Client) => {
+    if (viewer.kind !== "human") return [];
+    const rooms = new Map<
+      string,
+      { room: string; participants: Participant[]; last: Message | null }
+    >();
+    for (const message of store.latest(viewer.id))
+      rooms.set(message.room!, {
+        room: message.room!,
+        participants: [],
+        last: message,
+      });
+    for (const { room, ...participant } of store.presence()) {
+      const chat = rooms.get(room) ?? { room, participants: [], last: null };
+      chat.participants.push(participant);
+      rooms.set(room, chat);
+    }
+    return [...rooms.values()]
+      .sort(
+        (a, b) =>
+          (b.last?.id ?? Infinity) - (a.last?.id ?? Infinity) ||
+          a.room.localeCompare(b.room),
+      )
+      .map((chat) => ({
+        ...chat,
+        participants: people(viewer, chat.participants),
+      }));
+  };
   app.get("/api/state", (_req, res) => {
     const client = actor(res);
     res.json({
       client,
-      room: store.room(client.id) ?? null,
-      rooms: client.kind === "human" ? store.rooms() : [],
-      clients: clients(client),
-      messages: store.history(client.id),
-      inbox: store.inbox(client.id, 100),
-      pending: store.pending(client.id),
+      membership: store.membership(client.id),
+      chats: chats(client),
       devices: client.kind === "human" ? identities.devices(client) : [],
     });
   });
   app.get("/api/clients", (_req, res) => {
     store.requireRoom(actor(res).id);
-    res.json(clients(actor(res)));
+    res.json(people(actor(res), store.participants(actor(res).id)));
+  });
+  app.get("/api/rooms/:room/messages", human, (req, res) => {
+    res.json(store.transcript(actor(res).id, roomName.parse(req.params.room)));
   });
   app.post("/api/rooms/join", (req, res) => {
-    const { room } = joinSchema.parse(req.body);
-    store.joinRoom(actor(res).id, room);
+    const joined = store.joinRoom(actor(res).id, req.body);
     hub.publish({ type: "clients" });
     hub.publish({ type: "inbox", acknowledged: 0 }, actor(res).id);
-    res.json({ room, client: actor(res), participants: clients(actor(res)) });
+    res.json({
+      ...joined,
+      client: actor(res),
+      participants: people(actor(res), store.participants(actor(res).id)),
+    });
   });
   app.post("/api/rooms/leave", (req, res) => {
     z.object({}).strict().parse(req.body);
@@ -254,7 +309,7 @@ export function createAgentwire(options: Options) {
   });
   // Presence leases are transport liveness, not inbox polling.
   app.post("/api/rooms/heartbeat", (req, res) => {
-    const { room } = joinSchema.parse(req.body);
+    const { room } = heartbeatSchema.parse(req.body);
     const wasActive = store.room(actor(res).id);
     if (!store.renewRoom(actor(res).id, room))
       throw new Problem(409, "Join this room first");
@@ -355,7 +410,7 @@ export function createAgentwire(options: Options) {
     send("inbox", { pending: store.pending(client.id), acknowledged: 0 });
     const roster = () => ({
       room: store.room(client.id) ?? null,
-      participants: clients(client),
+      participants: people(client, store.participants(client.id)),
     });
     send("participants", roster());
     const unsubscribe = hub.subscribe({
@@ -399,20 +454,13 @@ export function createAgentwire(options: Options) {
             break;
           case "clients":
             send("clients", {
-              room: store.room(client.id) ?? null,
-              rooms: client.kind === "human" ? store.rooms() : [],
-              participants: clients(store.client(client.id)!),
+              membership: store.membership(client.id),
+              chats: chats(store.client(client.id)!),
             });
             break;
           case "devices":
             if (client.kind === "human")
               send("devices", identities.devices(store.client(client.id)!));
-            break;
-          case "inbox":
-            send("inbox", {
-              pending: store.pending(client.id),
-              inbox: store.inbox(client.id, 100),
-            });
             break;
           case "resync":
             send("resync", {});
