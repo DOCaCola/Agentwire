@@ -146,8 +146,8 @@ export async function enrollDevice(
   show?.(enrollment.verification_url);
   await new Promise<void>((resolve, reject) => {
     const stream = new EventSource(new URL("api/enrollment/events", url), {
-      fetch: (input, init) =>
-        fetch(input, {
+      fetch: async (input, init) => {
+        const response = await fetch(input, {
           ...init,
           redirect: "manual",
           signal,
@@ -155,7 +155,14 @@ export async function enrollDevice(
             ...Object.fromEntries(new Headers(init?.headers)),
             Authorization: `Bearer ${credential.token}`,
           },
-        }),
+        });
+        if (response.status >= 500 || response.status === 429) {
+          await response.body?.cancel();
+          // EventSource retries transport failures; it must not close on a temporary HTTP error.
+          throw new Error("Enrollment event connection unavailable");
+        }
+        return response;
+      },
     });
     const timeout = setTimeout(
       () =>
@@ -198,7 +205,7 @@ export async function enrollDevice(
       }
     });
     stream.onerror = (event) => {
-      if (event.code !== undefined && event.code < 500 && event.code !== 429)
+      if (event.code !== undefined || stream.readyState === EventSource.CLOSED)
         finish(
           new Error(
             `Device enrollment connection rejected (HTTP ${event.code})`,

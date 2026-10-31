@@ -4,6 +4,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, rm, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import { once } from "node:events";
 import { fixture, ownerToken, until } from "./support.js";
 import {
   agentCredential,
@@ -11,6 +13,70 @@ import {
   deviceCredential,
   enrollDevice,
 } from "../src/device-client.js";
+
+test("enrollment SSE recovers from a server outage and rejects redirects without forwarding the device credential", async () => {
+  let forwarded = 0,
+    attempts = 0,
+    mode = "outage";
+  const trap = createServer((_req, res) => {
+    forwarded++;
+    res.end();
+  }).listen(0, "127.0.0.1");
+  await once(trap, "listening");
+  const trapUrl = `http://127.0.0.1:${(trap.address() as { port: number }).port}`;
+  let url = "";
+  const server = createServer((req, res) => {
+    if (req.method === "POST" && req.url === "/api/enrollment") {
+      req.resume();
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          status: "pending",
+          user_code: "1234ABCD",
+          verification_url: url + "/ui/",
+          expires_at: Date.now() + 10_000,
+        }),
+      );
+    } else if (req.url === "/api/enrollment/events") {
+      attempts++;
+      if (mode === "redirect") res.writeHead(302, { Location: trapUrl }).end();
+      else if (attempts === 1) res.writeHead(503).end();
+      else
+        res
+          .writeHead(200, { "Content-Type": "text/event-stream" })
+          .end('event: enrollment\ndata: {"status":"approved"}\n\n');
+    } else {
+      res.writeHead(404).end();
+      assert.fail("Unexpected polling endpoint: " + req.url);
+    }
+  }).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const credential = {
+    url,
+    name: "Outage test",
+    token: "aw_" + randomBytes(32).toString("base64url"),
+  };
+  const abort = new AbortController();
+  try {
+    await enrollDevice(credential, () => {}, abort.signal);
+    assert.equal(attempts, 2);
+    mode = "redirect";
+    await assert.rejects(
+      enrollDevice(credential, () => {}, abort.signal),
+      /302/,
+    );
+    assert.equal(forwarded, 0);
+  } finally {
+    abort.abort();
+    server.closeAllConnections();
+    trap.closeAllConnections();
+    await Promise.all([
+      new Promise<void>((resolve) => server.close(() => resolve())),
+      new Promise<void>((resolve) => trap.close(() => resolve())),
+    ]);
+  }
+});
 
 test("device enrollment requires human code approval, streams status without polling, and isolates device credentials from agent inboxes", async () => {
   const f = await fixture(undefined, "/relay");
