@@ -15,10 +15,10 @@ Open <http://localhost:8765/ui/> and sign in with the owner token. Use **+** bes
 
 ## Easy device setup
 
-Install Node 24.13+ (below 27), then install Agentwire from GitHub:
+Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global github:DOCaCola/Agentwire
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.2.0/agentwire-0.2.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 

@@ -938,6 +938,14 @@ dialog summary {
     border: 0;
     padding: 0;
   }
+  #manage-devices {
+    display: flex;
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    margin: 16px 0 0;
+    font-size: 12px;
+  }
   .identity .avatar,
   .identity > div {
     display: none;

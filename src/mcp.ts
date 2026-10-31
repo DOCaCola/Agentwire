@@ -42,7 +42,7 @@ export class McpEndpoint {
   }
   private makeServer(actor: Client): Server {
     const server = new Server(
-      { name: "agentwire", version: "0.1.0" },
+      { name: "agentwire", version: "0.2.0" },
       {
         capabilities: { tools: {} },
         instructions: `You are authenticated as ${actor.id}. Sender identity is enforced by Agentwire.
