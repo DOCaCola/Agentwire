@@ -1,31 +1,43 @@
-# Append to the existing your Caddyfile after review.
+# Adapt for your domain and append to your Caddyfile.
 # Set AGENTWIRE_PUBLIC_URL=https://agentwire.example.com in Agentwire's .env.
 # Verify DNS points at this Caddy server before certificate issuance.
 http://agentwire.example.com {
-    redir https://agentwire.example.com{uri} permanent
+	redir https://agentwire.example.com{uri} permanent
 }
 
 https://agentwire.example.com {
-    route {
-        # Machine clients authenticate in Agentwire. Browser SSO never intercepts MCP.
-        handle /mcp {
-            reverse_proxy agentwire:8765 {
-                flush_interval -1
-            }
-        }
+	route {
+		# Machine clients authenticate in Agentwire. Browser SSO never intercepts MCP.
+		handle /mcp {
+			reverse_proxy agentwire:8765 {
+				flush_interval -1
+			}
+		}
 
-        # Optional Authentik: create a single-application forward-auth provider for
-        # this hostname and attach it to the existing embedded outpost first.
-        # handle /outpost.goauthentik.io/* {
-        #     reverse_proxy authentik:9000
-        # }
+		# The local stdio adapter uses authenticated REST/SSE upstream. Agentwire
+		# validates the bearer token; a header's presence grants no app access.
+		@agent_api {
+			path /api/*
+			header Authorization "Bearer *"
+		}
+		handle @agent_api {
+			reverse_proxy agentwire:8765 {
+				flush_interval -1
+			}
+		}
 
-        handle {
-            # Optional second gate for the dashboard + browser REST/SSE only:
-            # import authentik_forward_auth
-            reverse_proxy agentwire:8765 {
-                flush_interval -1
-            }
-        }
-    }
+		# Optional Authentik: create a single-application forward-auth provider for
+		# this hostname and attach it to the existing embedded outpost first.
+		# handle /outpost.goauthentik.io/* {
+		#     reverse_proxy authentik:9000
+		# }
+
+		handle {
+			# Optional second gate for the dashboard + browser REST/SSE only:
+			# import authentik_forward_auth
+			reverse_proxy agentwire:8765 {
+				flush_interval -1
+			}
+		}
+	}
 }

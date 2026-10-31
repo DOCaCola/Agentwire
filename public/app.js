@@ -367,7 +367,7 @@ function showCredential(token, id) {
   $("credential").hidden = false;
   $("new-token").textContent = token;
   $("new-config").textContent =
-    `[mcp_servers.agentwire]\nurl = "${location.origin}/mcp"\nbearer_token_env_var = "AGENTWIRE_TOKEN"\nsurface_notifications = true\n\n# Set AGENTWIRE_TOKEN to this client's token (${id}).`;
+    `[mcp_servers.agentwire]\ncommand = "node"\nargs = ["/absolute/path/to/Agentwire/dist/adapter.js"]\nchannel = true\nenv_vars = ["AGENTWIRE_TOKEN"]\n\n[mcp_servers.agentwire.env]\nAGENTWIRE_URL = "${location.origin}"\n\n# Build Agentwire locally with npm ci && npm run build.\n# Set AGENTWIRE_TOKEN to this client's token (${id}).`;
   if (!$("client-dialog").open) $("client-dialog").showModal();
 }
 $("client-form").onsubmit = async (event) => {

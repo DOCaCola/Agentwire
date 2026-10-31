@@ -1,5 +1,5 @@
 # Merge with: docker compose -f compose.yaml -f deploy/compose.caddy.yaml up -d --build
-# Joins the existing Caddy stack network. The loopback-only base port remains
+# Set the external network name to your existing Caddy network. The loopback-only base port remains
 # available for local diagnostics; containers communicate over caddy_default.
 services:
   agentwire:

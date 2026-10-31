@@ -3,23 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
-
-export const clientId = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/);
-export const sendSchema = z
-  .object({
-    to: z.union([z.literal("all"), clientId]).default("all"),
-    channel: z
-      .string()
-      .regex(/^[a-z0-9][a-z0-9_-]{0,47}$/)
-      .default("general"),
-    body: z.string().trim().min(1).max(2000),
-    kind: z
-      .enum(["note", "question", "answer", "directive", "done"])
-      .default("note"),
-    reply_to: z.number().int().positive().optional(),
-    idempotency_key: z.string().min(1).max(128).optional(),
-  })
-  .strict();
+import { clientId, sendSchema } from "./protocol.js";
 export type SendInput = z.input<typeof sendSchema>;
 export type Client = {
   id: string;
@@ -256,9 +240,10 @@ export class Store {
         .get(actor) as { count: number }
     ).count;
   }
-  acknowledge(actor: string, ids: number[]): void {
+  acknowledge(actor: string, ids: number[]): number {
     this.db.exec("BEGIN");
     try {
+      let changed = 0;
       for (const id of ids) {
         if (
           !this.db
@@ -269,14 +254,16 @@ export class Store {
         ) {
           throw new Problem(404, "Delivery not found");
         }
-        this.db
+        const update = this.db
           .prepare(
-            `UPDATE deliveries SET acked_at=COALESCE(acked_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-          WHERE message_id=? AND client_id=?`,
+            `UPDATE deliveries SET acked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          WHERE message_id=? AND client_id=? AND acked_at IS NULL`,
           )
           .run(id, actor);
+        changed += Number(update.changes);
       }
       this.db.exec("COMMIT");
+      return changed;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

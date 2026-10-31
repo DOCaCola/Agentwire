@@ -10,7 +10,9 @@ import type {
 import { z } from "zod";
 import { Store, Problem, hashToken, type Client } from "./store.js";
 import { Hub } from "./hub.js";
-import { McpEndpoint, ackSchema } from "./mcp.js";
+import { McpEndpoint } from "./mcp.js";
+import { ackSchema, inboxSchema } from "./protocol.js";
+import { eventStream } from "./sse.js";
 
 export type Options = {
   database: string;
@@ -153,6 +155,19 @@ export function createAgentwire(options: Options) {
       pending: store.pending(client.id),
     });
   });
+  app.get("/api/clients", (_req, res) => {
+    res.json(clients());
+  });
+  app.get("/api/inbox", (req, res) => {
+    const { limit } = inboxSchema.parse(
+      req.query.limit === undefined ? {} : { limit: Number(req.query.limit) },
+    );
+    const client = actor(res);
+    res.json({
+      messages: store.inbox(client.id, limit),
+      pending: store.pending(client.id),
+    });
+  });
   app.post("/api/clients", admin, (req, res) => {
     const result = store.createClient(req.body);
     hub.publish({ type: "clients" });
@@ -183,9 +198,32 @@ export function createAgentwire(options: Options) {
   });
   app.post("/api/ack", (req, res) => {
     const { ids } = ackSchema.parse(req.body);
-    store.acknowledge(actor(res).id, ids);
-    hub.publish({ type: "inbox" }, actor(res).id);
+    const acknowledged = store.acknowledge(actor(res).id, ids);
+    hub.publish({ type: "inbox", acknowledged }, actor(res).id);
     res.json({ ok: true });
+  });
+  app.get("/api/channel-events", (_req, res) => {
+    const client = actor(res);
+    if (hub.online(client.id) >= 16)
+      throw new Problem(429, "Connection limit reached");
+    const { send } = eventStream(res);
+    send("inbox", { pending: store.pending(client.id), acknowledged: 0 });
+    const unsubscribe = hub.subscribe({
+      client: client.id,
+      close: () => res.end(),
+      send: (event) => {
+        if (
+          event.type === "inbox" ||
+          (event.type === "message" && event.message.sender !== client.id)
+        ) {
+          send("inbox", {
+            pending: store.pending(client.id),
+            acknowledged: event.type === "inbox" ? event.acknowledged : 0,
+          });
+        }
+      },
+    });
+    res.on("close", unsubscribe);
   });
   app.get("/api/events", (req, res) => {
     const client = actor(res);
@@ -196,21 +234,7 @@ export function createAgentwire(options: Options) {
       .int()
       .nonnegative()
       .parse(req.get("last-event-id") ?? req.query.after ?? 0);
-    res.set({
-      "Content-Type": "text/event-stream",
-      Connection: "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
-    res.flushHeaders();
-    const send = (type: string, data: unknown, id?: number) => {
-      // A full write buffer ends this connection. Replay/live callbacks must stop
-      // writing until the client reconnects with the last accepted event ID.
-      if (res.writableEnded) return;
-      const ok = res.write(
-        `${id ? `id: ${id}\n` : ""}event: ${type}\ndata: ${JSON.stringify(data)}\n\n`,
-      );
-      if (!ok) res.end(); // Slow consumers reconnect and recover from SQLite, rather than grow memory.
-    };
+    const { send } = eventStream(res);
     const missed = store.since(client.id, after);
     if (missed.length > 100) send("resync", {});
     else for (const message of missed) send("message", message, message.id);
@@ -237,22 +261,7 @@ export function createAgentwire(options: Options) {
         }
       },
     });
-    const heartbeat = setInterval(
-      () => res.write(": keepalive\n\n"),
-      20_000,
-    ).unref();
-    // Cookie expiration closes live streams too; bearer streams are bounded to the same duration.
-    const expiry = setTimeout(
-      () => res.end(),
-      res.locals.sessionExpires
-        ? res.locals.sessionExpires - Date.now()
-        : 12 * 60 * 60_000,
-    ).unref();
-    res.on("close", () => {
-      clearInterval(heartbeat);
-      clearTimeout(expiry);
-      unsubscribe();
-    });
+    res.on("close", unsubscribe);
   });
   app.all("/mcp", authenticate(true), async (req, res) => {
     await mcp.handle(req, res, actor(res));

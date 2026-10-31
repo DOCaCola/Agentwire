@@ -870,14 +870,14 @@ dialog summary {
     margin-bottom: 45px;
   }
   .workspace {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .sidebar {
     position: relative;
     height: auto;
     padding: 17px 20px;
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 0;
   }
   .sidebar .brand {
@@ -997,6 +997,7 @@ dialog summary {
   }
   .clients {
     display: flex;
+    min-width: 0;
     grid-column: 1/-1;
     gap: 10px;
     max-width: 100%;
