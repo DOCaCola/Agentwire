@@ -115,7 +115,6 @@ export async function enrollDevice(
   credential: DeviceCredential,
   report: (message: string) => void,
   signal: AbortSignal,
-  show?: (url: string) => void,
 ): Promise<void> {
   const url = clientUrl(credential.url);
   const enrollment = z
@@ -141,9 +140,8 @@ export async function enrollDevice(
     );
   if (enrollment.status === "approved") return;
   report(
-    `Approve device "${credential.name}" at ${enrollment.verification_url}\nDevice fingerprint: ${createHash("sha256").update(credential.token).digest("hex").slice(0, 16)}\nApproval code: ${enrollment.user_code.slice(0, 4)}-${enrollment.user_code.slice(4)}\nNo token needs to be copied. Waiting for dashboard approval…`,
+    `Device: ${credential.name}\nApproval code: ${enrollment.user_code.slice(0, 4)}-${enrollment.user_code.slice(4)}\nDevice fingerprint: ${createHash("sha256").update(credential.token).digest("hex").slice(0, 16)}\n\nOn your own computer or phone, open:\n${enrollment.verification_url}\nSign in there, open Devices, and approve this client using the code above.\nThis client needs no browser or login. Waiting for remote approval…`,
   );
-  show?.(enrollment.verification_url);
   await new Promise<void>((resolve, reject) => {
     const stream = new EventSource(new URL("api/enrollment/events", url), {
       fetch: async (input, init) => {

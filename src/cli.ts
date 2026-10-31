@@ -2,7 +2,6 @@
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
-import { spawn } from "node:child_process";
 import {
   clientUrl,
   deviceCredential,
@@ -19,7 +18,6 @@ try {
       name: { type: "string" },
       client: { type: "string" },
       session: { type: "string" },
-      "no-open": { type: "boolean" },
       "reset-device": { type: "boolean" },
       help: { type: "boolean" },
     },
@@ -27,7 +25,7 @@ try {
   const command = positionals[0];
   if (values.help || !command) {
     console.log(
-      "Usage: agentwire setup --url https://relay.example.com/ --client codex|claude [--name DEVICE] [--no-open]\n       agentwire adapter --url https://relay.example.com/ [--name AGENT] [--session STABLE-ID]\n\nSetup generates a device credential locally, waits for dashboard approval, and registers the adapter. No token copying is required.",
+      "Usage: agentwire setup --url https://relay.example.com/ --client codex|claude [--name DEVICE] [--reset-device]\n       agentwire adapter --url https://relay.example.com/ [--name AGENT] [--session STABLE-ID]\n\nSetup displays an approval code. Open the dashboard on your own computer or phone, sign in there, and approve the remote client. Setup waits for approval and registers the adapter automatically. No browser or login is needed on this client.",
     );
   } else if (command === "setup") {
     if (!values.url || !values.client)
@@ -44,29 +42,10 @@ try {
     const shutdown = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM"])
       process.once(signal, () => shutdown.abort());
-    const open = values["no-open"]
-      ? undefined
-      : (link: string) => {
-          const [executable, args] =
-            process.platform === "darwin"
-              ? ["open", [link]]
-              : process.platform === "win32"
-                ? ["rundll32", ["url.dll,FileProtocolHandler", link]]
-                : ["xdg-open", [link]];
-          const child = spawn(executable!, args as string[], {
-            stdio: "ignore",
-            detached: true,
-          });
-          child.on("error", () =>
-            console.error("Open the dashboard URL above in your browser."),
-          );
-          child.unref();
-        };
     await enrollDevice(
       credential,
       (message) => console.error(message),
       shutdown.signal,
-      open,
     );
     const path = await setupClient(
       values.client,

@@ -18,13 +18,13 @@ Open <http://localhost:8765/ui/> and sign in with the owner token. Use **+** bes
 Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.2.1/agentwire-0.2.1.tgz
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.3.0/agentwire-0.3.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 
-For Claude Code, use `--client claude`. On a headless device, add `--no-open` and open the displayed dashboard URL from another device. `--name` sets the device label.
+For Claude Code, use `--client claude`. Setup always prints a code and waits; it never launches a browser or asks you to sign in on the client. On your own computer or phone, open the displayed dashboard URL, sign in, and approve the remote client under **Devices** using its code. `--name` sets the device label.
 
-Setup generates a random device credential locally and sends only its SHA-256 hash to the relay. Sign in to the dashboard, open **Devices**, compare the device name and fingerprint, and enter the approval code shown by setup. The request expires after ten minutes. Approval arrives over SSE; setup does not poll. Once approved, setup registers the MCP adapter in the selected client's user configuration, preserving unrelated settings and saving a private backup. There is no token to copy into MCP settings or shell startup files.
+The remote client generates a random device credential locally and sends only its SHA-256 hash to the relay. In the dashboard on your own device, compare the client name and fingerprint and enter the approval code shown by setup. The request expires after ten minutes. Approval arrives over SSE; setup does not poll. Once approved, setup registers the MCP adapter in the selected client's user configuration, preserving unrelated settings and saving a private backup. There is no token to copy into MCP settings or shell startup files.
 
 Device credentials live in `~/.config/agentwire/` with mode `0600`, inside a `0700` directory. `AGENTWIRE_CONFIG_DIR` selects another local directory. The same enrolled device can be used for Codex and Claude. A device credential can create agent inboxes; it cannot read or send messages. For a denied, expired, or revoked enrollment, rerun setup with `--reset-device` to generate a new local credential and request fresh approval. Revoke an older approved device in the dashboard before resetting it. Re-enrollment is never automatic.
 

@@ -55,7 +55,6 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
         client,
         "--name",
         "Test device",
-        "--no-open",
       ],
       { env, stdio: ["ignore", "pipe", "pipe"] },
     );
@@ -76,6 +75,8 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
   try {
     const first = setup("codex");
     await until(() => /Approval code:/.test(first.errors));
+    assert.match(first.errors, /On your own computer or phone/);
+    assert.match(first.errors, /This client needs no browser or login/);
     const device = f.identities.devices(f.store.client("owner")!)[0]!;
     const code = /Approval code: ([A-F0-9-]+)/
       .exec(first.errors)![1]!

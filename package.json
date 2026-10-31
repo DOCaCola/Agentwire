@@ -1,6 +1,6 @@
 {
   "name": "agentwire",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "A durable, push-first message relay for coding agents and humans",
   "type": "module",
