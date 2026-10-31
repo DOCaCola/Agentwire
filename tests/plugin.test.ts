@@ -80,6 +80,8 @@ test(
         [
           "setup_agentwire",
           "agentwire_status",
+          "join_room",
+          "leave_room",
           "send_message",
           "read_inbox",
           "acknowledge_messages",
@@ -154,10 +156,25 @@ test(
       await until(() =>
         a!.notices.some((notice) => notice.meta.event === "device-approved"),
       );
+      assert.equal(
+        f.store.clients().length,
+        1,
+        "approval alone never creates an agent",
+      );
+      assert.equal(
+        toolData(
+          await a.client.callTool({ name: "agentwire_status", arguments: {} }),
+        ).status,
+        "ready",
+      );
+      await a.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room" },
+      });
       const connected = toolData(
         await a.client.callTool({ name: "agentwire_status", arguments: {} }),
       );
-      assert.equal(connected.status, "connected");
+      assert.equal(connected.status, "joined");
       assert.match(connected.client_id, /^agent-/);
       const credentials = (await readdir(settings)).find((name) =>
         /^[a-f0-9]{64}\.json$/.test(name),
@@ -208,20 +225,78 @@ test(
       });
       assert.equal(f.store.pending(connected.client_id), 0);
       b = await plugin(settings, installed);
-      await until(() => {
-        const agents = f.store
-          .clients()
-          .filter((client) => client.kind === "agent");
-        return (
-          agents.length === 2 &&
-          agents.every((client) => f.hub.online(client.id) > 0)
-        );
+      await until(
+        () =>
+          f.requests.filter(
+            (request) => request.path === "/relay/api/enrollment",
+          ).length === 2,
+      );
+      // A new plugin process reuses approval but remains absent from every room.
+      assert.equal(
+        f.store.clients().filter((client) => client.kind === "agent").length,
+        1,
+      );
+      assert.equal(
+        toolData(
+          await b.client.callTool({ name: "list_clients", arguments: {} }),
+        ).error.includes("Join"),
+        true,
+      );
+      await b.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room" },
       });
       const restored = toolData(
         await b.client.callTool({ name: "agentwire_status", arguments: {} }),
       );
-      assert.equal(restored.status, "connected");
+      assert.equal(restored.status, "joined");
       assert.notEqual(restored.client_id, connected.client_id);
+      const changes = () =>
+        a!.notices.filter(
+          (notice) => notice.meta.event === "participants-changed",
+        );
+      await until(() => changes().length === 1);
+      await b.client.callTool({ name: "leave_room", arguments: {} });
+      assert.equal(
+        toolData(
+          await b.client.callTool({ name: "agentwire_status", arguments: {} }),
+        ).status,
+        "ready",
+      );
+      const remaining = toolData(
+        await a.client.callTool({ name: "list_clients", arguments: {} }),
+      );
+      assert.ok(
+        !remaining.some(
+          (peer: { id: string }) => peer.id === restored.client_id,
+        ),
+      );
+      await b.client.callTool({
+        name: "join_room",
+        arguments: { room: "OtherTask" },
+      });
+      assert.equal(
+        (
+          await a.client.callTool({
+            name: "send_message",
+            arguments: { to: restored.client_id, body: "outside" },
+          })
+        ).isError,
+        true,
+      );
+      await b.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room" },
+      });
+      await until(() => changes().length === 2);
+      assert.equal(
+        toolData(
+          await b.client.callTool({ name: "agentwire_status", arguments: {} }),
+        ).client_id,
+        restored.client_id,
+        "leaving and rejoining reuses only this process identity",
+      );
+
       assert.equal(f.identities.devices(f.store.client("owner")!).length, 1);
       assert.equal(
         b.notices.filter((notice) => notice.meta.event === "device-approved")
@@ -321,6 +396,28 @@ test("an unapproved plugin restarts with the same device code and keeps setup st
     assert.equal(restored.status, "pending_approval");
     assert.equal(restored.approval_code, first.approval_code);
     assert.equal(restored.fingerprint, first.fingerprint);
+    const queued = toolData(
+      await a.client.callTool({
+        name: "join_room",
+        arguments: { room: "MyTask" },
+      }),
+    );
+    assert.equal(queued.requested_room, "MyTask");
+    assert.equal(f.store.clients().length, 1);
+    const device = f.identities.devices(f.store.client("owner")!)[0]!;
+    await f.request(`/api/devices/${device.id}`, ownerToken, {
+      action: "approve",
+      code: first.approval_code.replace("-", ""),
+    });
+    await until(() =>
+      a!.notices.some((notice) => notice.meta.event === "device-approved"),
+    );
+    const joined = toolData(
+      await a.client.callTool({ name: "agentwire_status", arguments: {} }),
+    );
+    assert.equal(joined.status, "joined");
+    assert.equal(joined.room, "MyTask");
+
     assert.equal(f.identities.devices(f.store.client("owner")!).length, 1);
   } finally {
     await a?.client.close();
@@ -352,7 +449,7 @@ test(
         { mode: 0o600 },
       );
       a = await plugin(directory);
-      assert.equal((await a.client.listTools()).tools.length, 6);
+      assert.equal((await a.client.listTools()).tools.length, 8);
       await until(() => contacted);
       assert.equal(
         toolData(
@@ -412,7 +509,7 @@ test("switching relays cancels the old approval stream and ignores a late approv
     );
     assert.equal(status.url, second.url + "/");
     assert.equal(first.store.clients().length, 1);
-    assert.equal(second.store.clients().length, 2);
+    assert.equal(second.store.clients().length, 1);
     assert.equal(
       a.notices.filter((notice) => notice.meta.event === "device-approved")
         .length,

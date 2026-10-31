@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 const relayUrl = new URL("../", document.currentScript.src);
 let me,
+  room,
+  desiredRoom,
   clients = [],
   devices = [],
   messages = [],
@@ -49,6 +51,7 @@ function toast(text) {
 function showLogin() {
   stream?.close();
   stream = undefined;
+  desiredRoom = undefined;
   $("workspace").hidden = true;
   $("login").hidden = false;
 }
@@ -62,7 +65,7 @@ function setConnection(connected) {
 function renderClients() {
   const selected = $("recipient").value;
   $("clients").replaceChildren();
-  $("recipient").replaceChildren(new Option("Everyone", "all"));
+  $("recipient").replaceChildren(new Option("Everyone in room", "all"));
   for (const client of clients) {
     const row = node("div", "client-row");
     row.append(node("span", `avatar ${client.kind}`, initials(client.name)));
@@ -225,6 +228,8 @@ function renderPending(count) {
 async function load() {
   const state = await api("/state");
   me = state.client;
+  room = state.room;
+  renderRoom(state.rooms);
   clients = state.clients;
   devices = state.devices;
   messages = state.messages;
@@ -350,6 +355,7 @@ function connect() {
   stream.onopen = () => {
     authChecked = false;
     setConnection(true);
+    void renewPresence();
   };
   stream.onerror = () => {
     setConnection(false);
@@ -361,6 +367,7 @@ function connect() {
   };
   stream.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
+    if (message.room !== room) return;
     if (!messages.some((item) => item.id === message.id)) {
       messages.push(message);
       messages = messages.slice(-100);
@@ -372,8 +379,13 @@ function connect() {
     }
   });
   stream.addEventListener("clients", (event) => {
-    clients = JSON.parse(event.data);
+    const data = JSON.parse(event.data);
+    const previous = room;
+    room = data.room;
+    clients = data.participants;
+    renderRoom(data.rooms);
     renderClients();
+    if (previous !== room) void load().catch((error) => toast(error.message));
   });
   stream.addEventListener("devices", (event) => {
     devices = JSON.parse(event.data);
@@ -395,6 +407,61 @@ function connect() {
     }
   });
 }
+function renderRoom(rooms) {
+  $("room-status").textContent = room
+    ? `Joined ${room}`
+    : "Join a room to collaborate.";
+  $("leave-room").hidden = !room && !desiredRoom;
+  $("room-options").replaceChildren(
+    ...rooms.map(
+      (item) =>
+        new Option(
+          `${item.room} · ${item.participants} participants`,
+          item.room,
+        ),
+    ),
+  );
+  for (const control of $("composer").elements) control.disabled = !room;
+  $("feed-description").textContent = room ? `Room: ${room}` : "No room joined";
+}
+async function renewPresence() {
+  if (!desiredRoom) return;
+  try {
+    await api("/rooms/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({ room: desiredRoom }),
+    });
+  } catch (error) {
+    toast(error.message);
+  }
+}
+setInterval(() => void renewPresence(), 20_000);
+$("room-form").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    const joined = await api("/rooms/join", {
+      method: "POST",
+      body: JSON.stringify({ room: $("room-name").value }),
+    });
+    desiredRoom = joined.room;
+    replyTo = undefined;
+    lastSubmission = undefined;
+    $("reply-info").textContent = "";
+    channelFilter = "";
+    await load();
+  } catch (error) {
+    toast(error.message);
+  }
+};
+$("leave-room").onclick = async () => {
+  try {
+    await api("/rooms/leave", { method: "POST", body: "{}" });
+    desiredRoom = undefined;
+    await load();
+  } catch (error) {
+    toast(error.message);
+  }
+};
 $("login-form").onsubmit = async (event) => {
   event.preventDefault();
   $("login-error").textContent = "";
@@ -457,7 +524,7 @@ $("composer").onsubmit = async (event) => {
   } catch (error) {
     toast(error.message);
   } finally {
-    button.disabled = false;
+    button.disabled = !room;
   }
 };
 $("body").onkeydown = (event) => {

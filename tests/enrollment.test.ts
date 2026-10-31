@@ -159,6 +159,8 @@ test("device enrollment requires human code approval, streams status without pol
     assert.deepEqual(again, a);
     assert.notEqual(a.token, b.token);
     assert.notEqual(a.client.id, b.client.id);
+    f.store.joinRoom(a.client.id, "test-room");
+    f.store.joinRoom(b.client.id, "test-room");
     const sent = await (
       await f.request("/api/messages", a.token, {
         to: b.client.id,
@@ -331,6 +333,7 @@ test("concurrent device setup persists a single private credential and stable se
       abort.signal,
       "stable-chat",
     );
+    f.store.joinRoom(a.client.id, "test-room");
     const message = await (
       await f.request("/api/messages", ownerToken, {
         to: a.client.id,
@@ -346,6 +349,7 @@ test("concurrent device setup persists a single private credential and stable se
       "stable-chat",
     );
     assert.equal(restored.token, a.token);
+    f.store.joinRoom(restored.client.id, "test-room");
     assert.equal(restored.client.id, a.client.id);
     assert.equal(
       (await (await f.request("/api/inbox", a.token)).json()).messages[0].id,

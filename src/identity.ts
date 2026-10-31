@@ -33,7 +33,7 @@ export class IdentityStore {
         session_key TEXT NOT NULL, client_id TEXT NOT NULL UNIQUE REFERENCES clients(id),
         PRIMARY KEY (device_id, session_key)
       );
-      PRAGMA user_version=2;
+
     `);
   }
   human(issuer: string, subject: string, name: string, admin: boolean): Client {

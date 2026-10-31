@@ -29,6 +29,7 @@ export async function fixture(
     publicUrl: url,
     oidc,
   });
+  wire.store.joinRoom("owner", "test-room");
   const requests: { method: string; path: string }[] = [];
   const server = httpServer((req, res) => {
     requests.push({ method: req.method!, path: req.url! });
@@ -52,16 +53,18 @@ export async function fixture(
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   }
-  async function add(id: string) {
+  async function add(id: string, room: string | null = "test-room") {
     const result = await request("/api/clients", ownerToken, {
       id,
       name: id.toUpperCase(),
       kind: "agent",
     });
     assert.equal(result.status, 201);
-    return (await result.json()).token as string;
+    const token = (await result.json()).token as string;
+    if (room) await request("/api/rooms/join", token, { room });
+    return token;
   }
-  async function mcp(token: string) {
+  async function mcp(token: string, room: string | null = "test-room") {
     const client = new Client({
       name: "agentwire-integration-test",
       version: "1.0.0",
@@ -85,11 +88,13 @@ export async function fixture(
     });
     await client.connect(transport);
     connections.push(client);
+    if (room) await client.callTool({ name: "join_room", arguments: { room } });
     // The SDK starts its standalone GET asynchronously after initialization.
     await until(() => wire.hub.online(wire.store.authenticate(token)!.id) > 0);
     return { client, transport, notifications };
   }
   async function sse(token: string, after = 0) {
+    await request("/api/rooms/join", token, { room: "test-room" });
     const abort = new AbortController();
     aborts.push(abort);
     const response = await fetch(`${url}/api/events?after=${after}`, {

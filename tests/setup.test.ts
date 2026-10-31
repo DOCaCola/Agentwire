@@ -134,6 +134,10 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
       let errors = "";
       transport.stderr!.on("data", (chunk) => (errors += chunk));
       await client.connect(transport);
+      await client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room" },
+      });
       const match = /connected as (agent-[a-f0-9]+)/.exec(errors);
       assert.ok(match, errors);
       return { client, notices, id: match[1]! };
@@ -147,8 +151,8 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
         body: "Only B wakes up",
       })
     ).json();
-    await until(() => b.notices.length === 1);
-    assert.equal(a.notices.length, 0);
+    await until(() => b.notices.some((notice) => notice.meta.pending === "1"));
+    assert.equal(a.notices.filter((notice) => notice.meta.pending).length, 0);
     const inbox = toolData(
       await b.client.callTool({ name: "read_inbox", arguments: {} }),
     );

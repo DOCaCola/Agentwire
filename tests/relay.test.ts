@@ -17,7 +17,7 @@ test("MCP pushes directed and broadcast messages without polling; sender and ses
       b = await f.mcp(bob),
       c = await f.mcp(carol);
     const listed = await a.client.listTools();
-    assert.equal(listed.tools.length, 4);
+    assert.equal(listed.tools.length, 6);
     const spoof = await a.client.callTool({
       name: "send_message",
       arguments: { sender: "owner", to: "bob", body: "spoof" },
@@ -159,6 +159,7 @@ test("REST, browser SSE, and MCP share recipient isolation, strict validation, a
     const hashes = f.store.db.prepare("SELECT token_hash FROM clients").all();
     assert.ok(hashes.every((row) => String(row.token_hash).length === 64));
     live.abort.abort();
+    await until(() => f.hub.online("bob") === 0);
     const recovered = await f.sse(bob, 0);
     await until(() =>
       recovered.events.some((event) => event.type === "message"),
@@ -296,6 +297,7 @@ test("messages, recipient snapshots, tokens, and acknowledgments survive a proce
     await f.stop();
     f = await fixture(database);
     assert.equal(f.store.pending("bob"), 0);
+    f.store.joinRoom("bob", "test-room");
     assert.equal(f.store.history("bob")[0]!.body, "Survives restart");
     assert.equal(f.store.authenticate(alice)!.id, "alice");
   } finally {
@@ -317,6 +319,7 @@ test("large SSE replay gaps request a bounded resync; slow replay consumers keep
     await until(() => replay.events.some((event) => event.type === "message"));
     // More data than one response write buffer: this must never write after end
     // or mark unconsumed messages as acknowledged.
+    f.store.joinRoom("bob", "test-room");
     assert.equal(f.store.pending("bob"), 100);
     replay.abort.abort();
     f.store.send(actor, { to: "bob", body: "The 101st event" });

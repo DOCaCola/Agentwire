@@ -16,7 +16,7 @@ class ChannelTransport extends StdioClientTransport {
   }
 }
 
-async function adapter(url: string, token: string) {
+async function adapter(url: string, token: string, join = true) {
   const client = new Client({
     name: "channel-contract-test",
     version: "1.0.0",
@@ -53,6 +53,11 @@ async function adapter(url: string, token: string) {
     stderr = (stderr + String(chunk)).slice(-32_000);
   });
   await client.connect(transport);
+  if (join)
+    await client.callTool({
+      name: "join_room",
+      arguments: { room: "test-room" },
+    });
   return {
     client,
     notifications,
@@ -82,7 +87,14 @@ test("actual stdio adapter declares Claude channel capability, pushes compact no
     });
     assert.deepEqual(
       (await a.client.listTools()).tools.map((tool) => tool.name),
-      ["send_message", "read_inbox", "acknowledge_messages", "list_clients"],
+      [
+        "join_room",
+        "leave_room",
+        "send_message",
+        "read_inbox",
+        "acknowledge_messages",
+        "list_clients",
+      ],
     );
     await until(() => f.hub.online("bob") === 1);
     assert.equal(a.notifications.length, 0);
@@ -230,12 +242,31 @@ test("a disconnected event stream recovers the durable inbox and adapter restart
     });
     await until(() => a!.notifications.length === 1);
     f.hub.disconnect("bob");
+    assert.equal(
+      (
+        await f.request("/api/messages", alice, {
+          to: "bob",
+          body: "While offline",
+        })
+      ).status,
+      404,
+    );
+    await until(
+      () => f.hub.online("bob") === 1 && f.store.room("bob") === "test-room",
+      8000,
+    );
+    await until(
+      () =>
+        a!.notifications.some(
+          (notice, index) => index > 0 && notice.meta.pending === "1",
+        ),
+      8000,
+    );
     f.store.send(f.store.authenticate(alice)!, {
       to: "bob",
-      body: "During disconnect",
+      body: "After reconnect",
     });
-    await until(() => a!.notifications.length === 2, 8000);
-    assert.equal(a.notifications[1]!.meta.pending, "2");
+    await until(() => a!.notifications.length >= 2, 8000);
     assert.match(a.stderr, /reconnecting/);
     assert.equal(
       f.requests.filter((request) => request.path.startsWith("/api/inbox"))
@@ -251,7 +282,7 @@ test("a disconnected event stream recovers the durable inbox and adapter restart
     );
     assert.deepEqual(
       inbox.messages.map((message: { body: string }) => message.body),
-      ["Before disconnect", "During disconnect"],
+      ["Before disconnect", "After reconnect"],
     );
   } finally {
     await a?.client.close();
@@ -397,6 +428,7 @@ test("a redirected channel is rejected without forwarding its credential", async
     a = await adapter(
       `http://127.0.0.1:${(server.address() as { port: number }).port}`,
       token,
+      false,
     );
     await until(() => a!.closed);
     assert.equal(forwarded, 0);
@@ -433,6 +465,7 @@ test("channel reconnects after a relay 503, rejects malformed events, and stops 
     a = await adapter(
       `http://127.0.0.1:${port}`,
       "dummy-adapter-token-longer-than-32-characters",
+      false,
     );
     await until(() => a!.notifications.length === 1, 8000);
     assert.equal(attempts, 2);
@@ -443,6 +476,7 @@ test("channel reconnects after a relay 503, rejects malformed events, and stops 
     a = await adapter(
       `http://127.0.0.1:${port}`,
       "dummy-adapter-token-longer-than-32-characters",
+      false,
     );
     await until(() => a!.notifications.length === 1);
     const response = activeResponse!;

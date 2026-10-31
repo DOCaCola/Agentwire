@@ -11,7 +11,7 @@ import { z } from "zod";
 import { Store, Problem, hashToken, type Client } from "./store.js";
 import { Hub } from "./hub.js";
 import { McpEndpoint } from "./mcp.js";
-import { ackSchema, inboxSchema } from "./protocol.js";
+import { ackSchema, inboxSchema, joinSchema } from "./protocol.js";
 import { eventStream } from "./sse.js";
 import { relayUrl } from "./url.js";
 import { IdentityStore } from "./identity.js";
@@ -134,7 +134,8 @@ export function createAgentwire(options: Options) {
     for (const [key, value] of sessions)
       if (value.expires < Date.now()) sessions.delete(key);
     for (const id of identities.expire()) deviceChanged(id);
-  }, 60_000).unref();
+    if (store.expireRooms()) hub.publish({ type: "clients" });
+  }, 5_000).unref();
   app.get("/healthz", (_req, res) => {
     store.db.prepare("SELECT 1").get();
     res.json({ status: "ok" });
@@ -210,7 +211,7 @@ export function createAgentwire(options: Options) {
     res.clearCookie(cookieName, cookieOptions).json({ ok: true });
   });
   const clients = (viewer: Client) =>
-    store.clients().map((client) => ({
+    store.participants(viewer.id).map((client) => ({
       ...client,
       connections: hub.online(client.id),
       can_manage:
@@ -225,6 +226,8 @@ export function createAgentwire(options: Options) {
     const client = actor(res);
     res.json({
       client,
+      room: store.room(client.id) ?? null,
+      rooms: client.kind === "human" ? store.rooms() : [],
       clients: clients(client),
       messages: store.history(client.id),
       inbox: store.inbox(client.id, 100),
@@ -233,9 +236,36 @@ export function createAgentwire(options: Options) {
     });
   });
   app.get("/api/clients", (_req, res) => {
+    store.requireRoom(actor(res).id);
     res.json(clients(actor(res)));
   });
+  app.post("/api/rooms/join", (req, res) => {
+    const { room } = joinSchema.parse(req.body);
+    store.joinRoom(actor(res).id, room);
+    hub.publish({ type: "clients" });
+    hub.publish({ type: "inbox", acknowledged: 0 }, actor(res).id);
+    res.json({ room, client: actor(res), participants: clients(actor(res)) });
+  });
+  app.post("/api/rooms/leave", (req, res) => {
+    z.object({}).strict().parse(req.body);
+    store.leaveRoom(actor(res).id);
+    hub.publish({ type: "clients" });
+    res.json({ room: null });
+  });
+  // Presence leases are transport liveness, not inbox polling.
+  app.post("/api/rooms/heartbeat", (req, res) => {
+    const { room } = joinSchema.parse(req.body);
+    const wasActive = store.room(actor(res).id);
+    if (!store.renewRoom(actor(res).id, room))
+      throw new Problem(409, "Join this room first");
+    if (!wasActive) {
+      hub.publish({ type: "clients" });
+      hub.publish({ type: "inbox", acknowledged: 0 }, actor(res).id);
+    }
+    res.json({ room });
+  });
   app.get("/api/inbox", (req, res) => {
+    store.requireRoom(actor(res).id);
     const { limit } = inboxSchema.parse(
       req.query.limit === undefined ? {} : { limit: Number(req.query.limit) },
     );
@@ -323,10 +353,16 @@ export function createAgentwire(options: Options) {
       throw new Problem(429, "Connection limit reached");
     const { send } = eventStream(res);
     send("inbox", { pending: store.pending(client.id), acknowledged: 0 });
+    const roster = () => ({
+      room: store.room(client.id) ?? null,
+      participants: clients(client),
+    });
+    send("participants", roster());
     const unsubscribe = hub.subscribe({
       client: client.id,
       close: () => res.end(),
       send: (event) => {
+        if (event.type === "clients") send("participants", roster());
         if (
           event.type === "inbox" ||
           (event.type === "message" && event.message.sender !== client.id)
@@ -362,7 +398,11 @@ export function createAgentwire(options: Options) {
             send("message", event.message, event.message.id);
             break;
           case "clients":
-            send("clients", clients(store.client(client.id)!));
+            send("clients", {
+              room: store.room(client.id) ?? null,
+              rooms: client.kind === "human" ? store.rooms() : [],
+              participants: clients(store.client(client.id)!),
+            });
             break;
           case "devices":
             if (client.kind === "human")

@@ -1,6 +1,6 @@
 # Agentwire
 
-A self-hosted message relay for coding agents on different machines, with a live human dashboard. Send to `all` or a specific client. The local stdio channel adapter wakes an open DOCa Codex or Claude Code session when its inbox receives messages. The relay pushes compact inbox notices over HTTP SSE; there is no inbox polling loop or blocking wait tool.
+A self-hosted message relay for coding agents on different machines, with a live human dashboard. Join a named task room, then send to `all` active participants in that room or a discovered participant ID. Merely launching MCP does not make an agent addressable. The local stdio channel adapter wakes an open DOCa Codex or Claude Code session when its inbox receives messages. The relay pushes compact inbox notices over HTTP SSE; there is no inbox polling loop or blocking wait tool.
 
 ## Run with Docker Compose
 
@@ -26,7 +26,9 @@ codex plugin add agentwire@agentwire
 
 Restart the client, select Agentwire if your client requires plugin selection, then ask it to set up Agentwire with your relay base URL, for example `https://agentwire.example.com/`. The `setup_agentwire` tool immediately returns the device name, approval code, fingerprint, and dashboard address. Open that dashboard on your own computer or phone, sign in, and approve the code under **Devices**. The plugin initializes before enrollment and remains usable while approval is pending; completion arrives as a channel notice. Do not poll `agentwire_status` or the inbox.
 
-The plugin provides `setup_agentwire` and `agentwire_status` plus the four messaging tools below. Future chats restore the saved relay URL and reuse the approved device credential. Each adapter process receives a separate agent address. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
+Tell each agent **“Join room MyTask”**. The `join_room` tool creates or joins that exact task name and returns its active participants, so no coordinator ID is needed. Room names are case-sensitive. `list_clients` discovers only that room, and `to: "all"` broadcasts only to its participants. Joining a different room switches membership; `leave_room` removes the address from the active roster. The dashboard has the same explicit room controls for people.
+
+The plugin provides `setup_agentwire` and `agentwire_status` plus the six room and messaging tools below. Future chats restore the saved relay URL and reuse device approval, but never automatically join a room. An approved plugin stays ready and creates no agent identity until an explicit join. A join requested during setup or approval completes after approval in that process. Each joined adapter process has a separate agent identity. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
 
 When migrating from a manually configured Agentwire MCP server, remove that user-defined server with `codex mcp remove agentwire` before enabling the plugin. This prevents the manual declaration from overriding the plugin or creating a duplicate adapter. Keep the device credential files so the plugin reuses the approval. If another `codex` executable on PATH is stock Codex, invoke your DOCa executable explicitly.
 
@@ -37,7 +39,7 @@ The Git marketplace contains `plugins/agentwire/mcp/agentwire.cjs`, a generated,
 Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.4.0/agentwire-0.4.0.tgz
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.5.0/agentwire-0.5.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 
@@ -47,7 +49,7 @@ The remote client generates a random device credential locally and sends only it
 
 Device credentials live in `~/.config/agentwire/` with mode `0600`, inside a `0700` directory. `AGENTWIRE_CONFIG_DIR` selects another local directory. The same enrolled device can be used for Codex and Claude. A device credential can create agent inboxes; it cannot read or send messages. For a denied, expired, or revoked enrollment, rerun setup with `--reset-device` to generate a new local credential and request fresh approval. Revoke an older approved device in the dashboard before resetting it. Re-enrollment is never automatic.
 
-Each adapter process opens a separate agent identity, so simultaneous chats do not share an inbox. A transport reconnect keeps that identity. To keep an address and its durable inbox across adapter process restarts, set a unique `--session` value in that adapter's command arguments, for example `--session backend-review`. Reuse a session value only for the same logical agent, and do not launch it in two chats simultaneously. Without an explicit session value, a new adapter process creates a new address; previous inboxes remain until their owner revokes them. Owners can revoke their agents in the client list, or revoke the device and all its agents in **Devices**. There are at most 100 active agents per device and 1,000 clients per relay.
+Each standalone adapter process provisions a separate agent identity that remains unaddressable until `join_room`, so simultaneous chats do not share an inbox. A transport reconnect keeps that identity. To keep an address and its durable inbox across adapter process restarts, set a unique `--session` value in that adapter's command arguments, for example `--session backend-review`. Reuse a session value only for the same logical agent, and do not launch it in two chats simultaneously. Without an explicit session value, a new adapter process creates a new address; previous inboxes remain until their owner revokes them. Owners can revoke their agents in the client list, or revoke the device and all its agents in **Devices**. There are at most 100 non-revoked agent credentials per device and 1,000 clients per relay.
 
 After setup, restart the DOCa Codex client. Claude Code still requires the channel opt-in described below. Manual MCP configuration and explicit client tokens remain available for service integrations.
 
@@ -118,18 +120,22 @@ This enables a channel; it does not bypass normal tool approvals. Organization c
 
 ## Tools and delivery
 
-Agentwire exposes four tools:
+Agentwire exposes six room and messaging tools:
 
 | Tool                   | Purpose                                                                                                                          |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `join_room`            | Join `{room: "MyTask"}` and discover its active participants; switch by joining another room.                                    |
+| `leave_room`           | Leave the current room and stop being addressable.                                                                               |
 | `send_message`         | Send `{to: "all"}` or `{to: "client-id"}`, with body, channel, type, optional reply reference and retry key.                     |
 | `read_inbox`           | Read up to eight unacknowledged messages. Use once when beginning/resuming work or when a push notice says messages are pending. |
 | `acknowledge_messages` | Acknowledge IDs **after** handling their contents.                                                                               |
-| `list_clients`         | Discover client IDs and current live connections.                                                                                |
+| `list_clients`         | Discover only active participants in your current room.                                                                          |
 
-Example agent request: “Send the migration result to `reviewer-server`, then continue with the API work.”
+Example agent request on each device: **“Join room MyTask, introduce yourself to the other participants, and collaborate on the migration.”** The agent discovers peer IDs from the join response or `list_clients`. If it is first, it can continue work and receive a participant-change notice when peers arrive.
 
-The adapter emits only a compact `notifications/claude/channel` notice saying messages are waiting. Peer content is fetched with `read_inbox`; acknowledge only after handling it. At most one notice is outstanding per connection. A successful acknowledgment of previously pending deliveries releases the next notice if more remain. An idempotent repeated acknowledgment does not generate a notice loop. Startup and reconnect announce any pending inbox, including backlogs larger than the client's event queue. Closing stdio stops the network stream; token rejection terminates the adapter with a stderr diagnostic.
+Participant changes produce a separate compact, coalesced notice directing the agent to `list_clients`; no agent directory polling is needed.
+
+The adapter emits a compact `notifications/claude/channel` notice saying messages are waiting. Peer content is fetched with `read_inbox`; acknowledge only after handling it. At most one notice is outstanding per connection. A successful acknowledgment of previously pending deliveries releases the next notice if more remain. An idempotent repeated acknowledgment does not generate a notice loop. Joining and reconnecting announce any pending inbox for that room, including backlogs larger than the client's event queue. Closing stdio stops the network stream; token rejection terminates the adapter with a stderr diagnostic.
 
 Tests exercise the adapter subprocess over real MCP stdio, including tool forwarding, reconnects, and acknowledgment-driven delivery. Client model behavior depends on its channel implementation.
 
@@ -137,8 +143,9 @@ Tests exercise the adapter subprocess over real MCP stdio, including tool forwar
 
 - Each bearer credential is bound to one server-managed client identity. Neither the MCP tools nor REST accepts a `sender` field. Tokens are stored as SHA-256 hashes, and token rotation/revocation closes live sessions.
 - A directed message is visible to its sender and recipient. The owner has client-management rights but does **not** bypass direct-message visibility. Host administrators can of course inspect the database.
-- A broadcast fans out transactionally to all non-revoked clients existing at send time, excluding the sender's inbox. Newly registered clients do not gain old broadcasts. Channels label messages; they are not access-control groups.
-- SQLite commits the message and recipient deliveries before publishing live events. Offline recipients retain their deliveries. Receipts are explicit and idempotent. A live event means “sent over the stream,” not “processed by the agent.”
+- A broadcast fans out transactionally to active participants in the sender’s room at send time, excluding the sender's inbox. Newly registered clients do not gain old broadcasts. Rooms enforce membership boundaries. Channels are labels within a room. Directed recipients must also be active in the same room.
+- Launching MCP or pairing a device never implicitly joins a room. Clean transport disconnection immediately removes the participant when its last connection closes. Presence leases expire after 60 seconds if a dead connection goes undetected; clients renew every 20 seconds using a heartbeat (or MCP ping/pong), without reading inboxes. A live process can recover its explicitly requested membership after a transport reconnect. Relay restarts invalidate presence until renewed.
+- SQLite commits the message and recipient deliveries before publishing live events. Previously committed deliveries remain durable when recipients disconnect; new sends require active membership. History, inboxes, replies, and acknowledgments are scoped to the identity’s current room. Pre-room messages are retained in the database but are not assigned to or exposed through any room. Receipts are explicit and idempotent. A live event means “sent over the stream,” not “processed by the agent.”
 - Generic HTTP MCP clients receive raw `notifications/agentwire/message` events. Channel clients use the local adapter, which subscribes to `/api/channel-events` and emits compact `notifications/claude/channel` inbox notices. No peer text is injected in the notice. Both paths use the same durable delivery membership and explicit acknowledgments. A reconnect may redeliver unacknowledged work; notification delivery is best effort, and the client must not acknowledge before processing.
 - `idempotency_key` deduplicates sends per sender; reuse with different content is rejected. Acknowledgment batches are atomic.
 - Bodies are capped at 2,000 characters. Tool result pages, browser streams, connection counts, and notification backlogs are bounded. History shows the latest 100 visible messages plus up to 100 older pending deliveries. Acknowledging a pending batch makes the next batch available. Messages remain in SQLite; automatic history retention is not implemented.
@@ -200,7 +207,10 @@ All endpoints are relative to the relay base URL. Existing message endpoints req
 | `POST /api/login`              | Exchange `{token}` for a browser cookie.                                                                      |
 | `POST /api/logout`             | Revoke the current browser session.                                                                           |
 | `GET /api/state`               | Identity, roster, recent visible messages, pending inbox.                                                     |
-| `GET /api/clients`             | Authenticated client directory with live connection counts.                                                   |
+| `GET /api/clients`             | Active participants in the caller’s explicitly joined room; no global directory.                              |
+| `POST /api/rooms/join`         | Join `{room}` and return identity plus active participants.                                                   |
+| `POST /api/rooms/leave`        | Leave the current room.                                                                                       |
+| `POST /api/rooms/heartbeat`    | Renew an already joined `{room}` for 60 seconds.                                                              |
 | `GET /api/inbox?limit=8`       | Up to eight pending messages and total pending count.                                                         |
 | `GET /api/channel-events`      | Compact SSE inbox notices on connect and delivery/acknowledgment changes; no message bodies or replay cursor. |
 | `POST /api/messages`           | Same validated send input as the MCP tool.                                                                    |

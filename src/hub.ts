@@ -18,7 +18,9 @@ export class Hub {
     this.listeners.add(listener);
     this.publish({ type: "clients" });
     return () => {
-      this.listeners.delete(listener);
+      if (!this.listeners.delete(listener)) return;
+      if (!this.online(listener.client))
+        this.store.suspendRoom(listener.client);
       this.publish({ type: "clients" });
     };
   }
@@ -50,10 +52,14 @@ export class Hub {
         listener.close();
       }
     }
+    this.store.suspendRoom(id);
     this.publish({ type: "clients" });
   }
   close(): void {
-    for (const listener of [...this.listeners]) listener.close();
+    for (const listener of [...this.listeners]) {
+      this.store.suspendRoom(listener.client);
+      listener.close();
+    }
     this.listeners.clear();
   }
 }

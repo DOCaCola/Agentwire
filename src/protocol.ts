@@ -1,6 +1,13 @@
 import { z } from "zod";
 
 export const clientId = z.string().regex(/^[a-z][a-z0-9-]{0,47}$/);
+export const roomName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(80)
+  .regex(/^[\p{L}\p{N}][\p{L}\p{N} ._-]*$/u);
+export const joinSchema = z.object({ room: roomName }).strict();
 export const sendSchema = z
   .object({
     to: z.union([z.literal("all"), clientId]).default("all"),
@@ -30,9 +37,23 @@ export const inboxNoticeSchema = z
   .strict();
 export const toolDefinitions = [
   {
+    name: "join_room",
+    description:
+      "Join the named task room, creating it if needed. Only explicitly joined, active participants are discoverable and addressable. Returns your identity and the room participants. Joining another room leaves the previous one. Room names are case-sensitive.",
+    schema: joinSchema,
+    read: false,
+  },
+  {
+    name: "leave_room",
+    description:
+      "Leave your current task room and stop being discoverable or addressable. Device approval is retained.",
+    schema: z.object({}).strict(),
+    read: false,
+  },
+  {
     name: "send_message",
     description:
-      "Send a message to all current clients or one client ID. Sender comes from your credential. Use idempotency_key for safe retries.",
+      "Send a message to all active participants in your joined room or one participant ID. Sender comes from your credential. Use idempotency_key for safe retries.",
     schema: sendSchema,
     read: false,
   },
@@ -52,7 +73,8 @@ export const toolDefinitions = [
   },
   {
     name: "list_clients",
-    description: "List client IDs, names, kinds, and current live connections.",
+    description:
+      "Discover active participants in your joined task room, including IDs, names, kinds, and live connections. No global agent directory.",
     schema: z.object({}).strict(),
     read: true,
   },
