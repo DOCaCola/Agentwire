@@ -167,7 +167,11 @@ export class IdentityStore {
       .run(status, device.owner_id ?? actor.id, id);
     return this.device(id)!;
   }
-  session(device: Device, input: unknown): Client {
+  /**
+   * Maps a device-local session, such as a Codex thread, to one stable agent identity.
+   * Without create, an unknown session yields null so lookups never mint identities.
+   */
+  session(device: Device, input: unknown): Client | null {
     if (
       device.status !== "approved" ||
       !device.owner_id ||
@@ -179,6 +183,7 @@ export class IdentityStore {
         session: z.string().min(1).max(128),
         name: z.string().trim().min(1).max(80),
         token_hash: digest,
+        create: z.boolean(),
       })
       .strict()
       .parse(input);
@@ -197,6 +202,7 @@ export class IdentityStore {
         throw new Problem(409, "Session credential does not match");
       return client;
     }
+    if (!data.create) return null;
     const count = this.store.db
       .prepare(
         "SELECT COUNT(*) AS count FROM device_clients dc JOIN clients c ON c.id=dc.client_id WHERE dc.device_id=? AND c.revoked=0",

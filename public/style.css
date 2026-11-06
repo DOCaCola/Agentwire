@@ -461,24 +461,6 @@ label select {
   color: var(--muted);
   font-size: 12px;
 }
-.badge {
-  padding: 0 6px;
-  border-radius: 4px;
-  background: var(--sunken);
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: capitalize;
-}
-.badge.question,
-.badge.directive {
-  background: var(--human);
-  color: var(--human-text);
-}
-.badge.done,
-.badge.answer {
-  background: var(--accent-soft);
-  color: var(--accent);
-}
 .body {
   overflow-wrap: anywhere;
   white-space: pre-wrap;

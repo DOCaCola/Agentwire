@@ -4,8 +4,11 @@ Implement root-cause solutions that fit the design. Do not add narrow workaround
 unnecessary defensive checks, silent fallbacks, or compatibility shims.
 
 - Device setup and MCP initialization never imply room participation. Only explicit
-  join intent creates an active participant; discovery, fan-out, direct sends,
-  agent history, inboxes and acknowledgments must respect the current room.
+  join intent creates a participant; discovery, fan-out, direct sends, agent
+  history, inboxes and acknowledgments must respect the current room.
+- Agent identities are stable per logical agent: one per Codex thread (from the
+  tool-call `threadId` metadata) or per configured session. Membership persists
+  as away while disconnected and is addressed by its unique room name.
 - Sender identity comes from authentication, never caller-supplied message fields.
 - REST, MCP, dashboard events, history, and acknowledgments must enforce the same
   delivery membership. Owner rights do not bypass directed-message visibility.

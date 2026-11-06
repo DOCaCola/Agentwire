@@ -22,6 +22,7 @@ import {
   ackSchema,
   heartbeatSchema,
   inboxSchema,
+  invalidArguments,
   roomName,
 } from "./protocol.js";
 import { eventStream } from "./sse.js";
@@ -206,8 +207,7 @@ export function createAgentwire(options: Options) {
   });
   app.post("/api/device/clients", (req, res) => {
     const client = identities.session(deviceCredential(req), req.body);
-    hub.publish({ type: "clients" });
-    res.status(201).json({ client });
+    res.json({ client });
   });
   app.post("/api/login", (req, res) => {
     const { token } = z
@@ -307,10 +307,14 @@ export function createAgentwire(options: Options) {
     hub.publish({ type: "clients" });
     res.json({ room: null });
   });
+  /** A restarted client resumes the membership its stable identity already holds. */
+  app.get("/api/rooms/current", (_req, res) => {
+    res.json({ membership: store.membership(actor(res).id) });
+  });
   // Presence leases are transport liveness, not inbox polling.
   app.post("/api/rooms/heartbeat", (req, res) => {
     const { room } = heartbeatSchema.parse(req.body);
-    const wasActive = store.room(actor(res).id);
+    const wasActive = store.membership(actor(res).id)?.active;
     if (!store.renewRoom(actor(res).id, room))
       throw new Problem(409, "Join this room first");
     if (!wasActive) {
@@ -394,6 +398,11 @@ export function createAgentwire(options: Options) {
   app.post("/api/messages", (req, res) => {
     const result = store.send(actor(res), req.body);
     if (result.fresh) hub.publish({ type: "message", message: result.message });
+    if (result.acknowledged)
+      hub.publish(
+        { type: "inbox", acknowledged: result.acknowledged },
+        actor(res).id,
+      );
     res.status(result.fresh ? 201 : 200).json(result.message);
   });
   app.post("/api/ack", (req, res) => {
@@ -494,7 +503,7 @@ export function createAgentwire(options: Options) {
       return;
     }
     if (error instanceof z.ZodError)
-      res.status(400).json({ error: "Invalid input", details: error.issues });
+      res.status(400).json(invalidArguments(error));
     else if (error instanceof Problem)
       res.status(error.status).json({ error: error.message });
     else if (error instanceof SyntaxError)

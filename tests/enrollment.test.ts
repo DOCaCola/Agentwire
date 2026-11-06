@@ -109,6 +109,7 @@ test("device enrollment requires human code approval, streams status without pol
           session: "test",
           name: "Agent",
           token_hash: createHash("sha256").update("token").digest("hex"),
+          create: true,
         })
       ).status,
       403,
@@ -153,17 +154,30 @@ test("device enrollment requires human code approval, streams status without pol
         .length,
       1,
     );
-    const a = await agentCredential(device, "Agent A", abort.signal, "a");
-    const b = await agentCredential(device, "Agent B", abort.signal, "b");
-    const again = await agentCredential(device, "Agent A", abort.signal, "a");
+    // A lookup never mints an identity; only an explicit create does.
+    assert.equal(
+      (await agentCredential(device, "Agent A", abort.signal, "a", false))
+        .client,
+      null,
+    );
+    const a = await agentCredential(device, "Agent A", abort.signal, "a", true);
+    const b = await agentCredential(device, "Agent B", abort.signal, "b", true);
+    const again = await agentCredential(
+      device,
+      "Agent A",
+      abort.signal,
+      "a",
+      false,
+    );
     assert.deepEqual(again, a);
     assert.notEqual(a.token, b.token);
     assert.notEqual(a.client.id, b.client.id);
     f.store.joinRoom(a.client.id, { room: "test-room", name: "Reviewer" });
+    // Device agents appear under the device name unless they choose one.
     f.store.joinRoom(b.client.id, { room: "test-room" });
     const sent = await (
       await f.request("/api/messages", a.token, {
-        to: b.client.id,
+        to: "test LAPTOP",
         body: "Private device-session message",
       })
     ).json();
@@ -181,7 +195,7 @@ test("device enrollment requires human code approval, streams status without pol
       [sent.id],
     );
     assert.equal(watched[0].sender_name, "Reviewer");
-    assert.equal(watched[0].recipient_name, "Agent B");
+    assert.equal(watched[0].recipient_name, "Test laptop");
     const chats = (await (await f.request("/api/state", alice.token)).json())
       .chats;
     assert.equal(chats[0].room, "test-room");
@@ -225,7 +239,10 @@ test("device enrollment requires human code approval, streams status without pol
     );
     assert.equal((await f.request("/api/state", a.token)).status, 401);
     assert.equal((await f.request("/api/state", b.token)).status, 401);
-    await assert.rejects(agentCredential(device, "No", abort.signal), /403/);
+    await assert.rejects(
+      agentCredential(device, "No", abort.signal, "c", true),
+      /403/,
+    );
     live.abort.abort();
     await assert.rejects(
       enrollDevice(device, () => {}, abort.signal),
@@ -352,11 +369,12 @@ test("concurrent device setup persists a single private credential and stable se
       "Durable",
       abort.signal,
       "stable-chat",
+      true,
     );
     f.store.joinRoom(a.client.id, { room: "test-room" });
     const message = await (
       await f.request("/api/messages", ownerToken, {
-        to: a.client.id,
+        to: "Laptop",
         body: "Survives restart",
       })
     ).json();
@@ -367,10 +385,16 @@ test("concurrent device setup persists a single private credential and stable se
       "Durable",
       abort.signal,
       "stable-chat",
+      false,
     );
     assert.equal(restored.token, a.token);
-    f.store.joinRoom(restored.client.id, { room: "test-room" });
-    assert.equal(restored.client.id, a.client.id);
+    assert.equal(restored.client!.id, a.client!.id);
+    // The restart marks the participant away; membership and inbox survive without a rejoin.
+    assert.deepEqual(f.store.membership(a.client!.id), {
+      room: "test-room",
+      name: "Laptop",
+      active: false,
+    });
     assert.equal(
       (await (await f.request("/api/inbox", a.token)).json()).messages[0].id,
       message.id,

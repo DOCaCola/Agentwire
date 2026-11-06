@@ -58,6 +58,8 @@ function report(error) {
 }
 const chat = (room) => chats.find((item) => item.room === room);
 const people = () => chat(selected)?.participants ?? [];
+const active = (participants) =>
+  participants.filter((item) => item.status === "active");
 const joinedHere = () => Boolean(selected && membership?.room === selected);
 
 // ---- Sign-in ----
@@ -260,8 +262,10 @@ function renderChats() {
           : "No messages yet",
       ),
     );
-    if (item.participants.length)
-      bottom.append(node("span", "present", String(item.participants.length)));
+    if (active(item.participants).length)
+      bottom.append(
+        node("span", "present", String(active(item.participants).length)),
+      );
     button.append(top, bottom);
     list.append(button);
   }
@@ -271,13 +275,13 @@ function renderChats() {
 // ---- Conversation ----
 function renderConversation() {
   const current = chat(selected);
-  const count = people().length;
+  const count = active(people()).length;
+  const away = people().length - count;
   $("chat-title").textContent = selected ?? "Chats";
   $("chat-subtitle").textContent = selected
     ? [
-        count
-          ? count + (count === 1 ? " person here" : " people here")
-          : "Nobody here now",
+        count ? count + " active" : "Nobody active",
+        away ? away + " away" : "",
         joinedHere() ? "you’re in this chat" : "",
       ]
         .filter(Boolean)
@@ -375,11 +379,6 @@ function renderMessage(message, continued) {
     head.append(node("strong", "", message.sender_name));
     if (message.recipient)
       head.append(node("span", "direct", "to " + message.recipient_name));
-    if (
-      message.kind !== "note" &&
-      !(message.kind === "answer" && message.reply_to)
-    )
-      head.append(node("span", "badge " + message.kind, message.kind));
     const time = node("time", "", formatTime(message.created_at));
     time.dateTime = message.created_at;
     time.title = new Date(message.created_at).toLocaleString();
@@ -399,8 +398,8 @@ function renderMessage(message, continued) {
     const reply = node("button", "reply", "Reply");
     reply.onclick = () => {
       replyTo = message;
-      const present = people().some((item) => item.id === message.sender);
-      $("recipient").value = present ? message.sender : "all";
+      const sender = people().find((item) => item.id === message.sender);
+      $("recipient").value = sender ? sender.name : "all";
       renderReply();
       $("body").focus();
     };
@@ -412,18 +411,14 @@ function renderRecipients() {
   const chosen = $("recipient").value;
   const others = people().filter((item) => item.id !== me?.id);
   $("recipient").replaceChildren(new Option("Everyone", "all"));
-  for (const item of others) {
-    const twin = others.some(
-      (other) => other !== item && other.name === item.name,
-    );
+  for (const item of others)
     $("recipient").append(
       new Option(
-        twin ? item.name + " (" + item.client_name + ")" : item.name,
-        item.id,
+        item.status === "away" ? item.name + " (away)" : item.name,
+        item.name,
       ),
     );
-  }
-  $("recipient").value = others.some((item) => item.id === chosen)
+  $("recipient").value = others.some((item) => item.name === chosen)
     ? chosen
     : "all";
 }
@@ -445,7 +440,7 @@ $("composer").onsubmit = async (event) => {
     const draft = {
       to: $("recipient").value,
       body: $("body").value,
-      ...(replyTo ? { kind: "answer", reply_to: replyTo.id } : {}),
+      ...(replyTo ? { reply_to: replyTo.id } : {}),
     };
     const serialized = JSON.stringify(draft);
     if (lastSubmission?.serialized !== serialized)
@@ -485,7 +480,9 @@ function renderPeople() {
     const row = node("li");
     const button = node("button", "person");
     const face = avatar(item.name, item.kind);
-    face.append(node("span", "presence" + (item.connections ? " online" : "")));
+    face.append(
+      node("span", "presence" + (item.status === "active" ? " online" : "")),
+    );
     button.append(face, node("span", "person-name", item.name));
     if (item.id === me.id) button.append(node("span", "tag", "you"));
     else if (item.kind === "human")
@@ -504,7 +501,7 @@ function openPerson(item) {
   $("person-name").textContent = item.name;
   $("person-kind").textContent = item.kind === "human" ? "Person" : "Agent";
   $("person-client").textContent = item.client_name;
-  $("person-status").textContent = item.connections ? "Connected" : "Away";
+  $("person-status").textContent = item.status === "active" ? "Active" : "Away";
   $("person-error").textContent = "";
   $("person-message").hidden = !joinedHere() || item.id === me.id;
   $("person-rotate").hidden = !item.can_rotate;
@@ -512,7 +509,7 @@ function openPerson(item) {
   $("person-dialog").showModal();
 }
 $("person-message").onclick = () => {
-  $("recipient").value = person.id;
+  $("recipient").value = person.name;
   $("person-dialog").close();
   $("body").focus();
 };

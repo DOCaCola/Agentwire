@@ -19,7 +19,13 @@ import {
   type DeviceCredential,
   type Enrollment,
 } from "./device-client.js";
-import { toolCatalog, joinSchema } from "./protocol.js";
+import {
+  invalidArguments,
+  joinSchema,
+  toolCatalog,
+  toolDefinitions,
+} from "./protocol.js";
+import type { Membership } from "./store.js";
 
 const setupSchema = z
   .object({
@@ -31,8 +37,14 @@ const setupSchema = z
 const settingsSchema = z
   .object({ url: z.string().transform((value) => clientUrl(value).href) })
   .strict();
+const emptySchema = z.object({}).strict();
 type Join = z.infer<typeof joinSchema>;
 const joinedSchema = z.object({ room: z.string(), name: z.string() });
+/**
+ * Codex sends the thread ID with every tool call, so a thread keeps one identity across
+ * restarts. Clients without it get an identity that lasts as long as this process.
+ */
+type Session = { key: string; scope: "thread" | "process" };
 type State =
   | { status: "unconfigured" }
   | { status: "connecting"; url: string }
@@ -53,6 +65,7 @@ type State =
       name: string;
       client_id: string;
       client_name: string;
+      identity_scope: Session["scope"];
     }
   | { status: "error"; message: string; url?: string };
 const setupTool = {
@@ -71,7 +84,7 @@ const setupTool = {
 const statusTool = {
   name: "agentwire_status",
   description:
-    "Show the relay, local agent identity, and pending approval code. Use on request or after an approval notice; do not poll while waiting for approval.",
+    "Show the relay, your room membership and identity, and any pending approval code. Use on request or after an approval notice; do not poll while waiting for approval.",
   inputSchema: {
     type: "object" as const,
     properties: {},
@@ -82,6 +95,13 @@ const statusTool = {
     destructiveHint: false,
     openWorldHint: false,
   },
+};
+const schemas: Record<string, z.ZodType> = {
+  setup_agentwire: setupSchema,
+  agentwire_status: emptySchema,
+  ...Object.fromEntries(
+    toolDefinitions.map((tool) => [tool.name, tool.schema]),
+  ),
 };
 const result = (value: unknown, isError = false) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -98,8 +118,9 @@ export function createPluginAdapter(options: {
     process.env.AGENTWIRE_CONFIG_DIR ??
     join(homedir(), ".config", "agentwire");
   const settingsPath = join(directory, "plugin.json");
+  const processSession = "process:" + randomUUID();
   const server = new Server(
-    { name: "agentwire", version: "0.6.0" },
+    { name: "agentwire", version: "0.7.0" },
     {
       capabilities: { experimental: { "claude/channel": {} }, tools: {} },
       instructions: `Agentwire is a relay between coding agents and people. Call join_room with the user's room/task name to collaborate. An approved plugin stays ready without creating an agent identity until explicitly joining. Call agentwire_status on request to inspect setup or participation. If unconfigured, ask for the user's relay base URL and call setup_agentwire.
@@ -112,12 +133,21 @@ ${channelInstructions}`,
   let attempt: AbortController | undefined;
   let relay: ReturnType<typeof createRelayConnection> | undefined;
   let approved: DeviceCredential | undefined;
-  let agent: Awaited<ReturnType<typeof agentCredential>> | undefined;
-  let requestedJoin: Join | undefined;
-  let joining = false;
+  let agent:
+    { client: { id: string; name: string }; session: Session } | undefined;
+  let requestedJoin: { join: Join; session: Session } | undefined;
   let configuring = false,
     closed = false;
   let settingsLoaded: Promise<void> = Promise.resolve();
+  // The automatic reconnect after a restart; tools that act on the relay wait for it.
+  let connection: Promise<unknown> = Promise.resolve();
+  // Identity and room changes run one at a time so concurrent calls share one identity.
+  let queue: Promise<unknown> = Promise.resolve();
+  function exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = queue.then(task, task);
+    queue = run.catch(() => undefined);
+    return run;
+  }
 
   function controlNotice(event: string, content: string) {
     if (closed) return;
@@ -145,6 +175,7 @@ ${channelInstructions}`,
     if (active !== attempt || active.signal.aborted || closed) return;
     relay?.stop();
     relay = undefined;
+    agent = undefined;
     state = {
       status: "error",
       url,
@@ -153,18 +184,82 @@ ${channelInstructions}`,
     };
     options.report(state.message);
   }
-  async function joinRoom(join: Join, signal: AbortSignal) {
-    if (joining)
-      return result({ error: "A room change is already in progress" }, true);
+  function sessionFor(meta: Record<string, unknown> | undefined): Session {
+    return typeof meta?.threadId === "string"
+      ? { key: "codex-thread:" + meta.threadId, scope: "thread" }
+      : { key: processSession, scope: "process" };
+  }
+  function membershipState(membership: { room: string; name: string }) {
+    state = {
+      status: "joined",
+      url: approved!.url,
+      room: membership.room,
+      name: membership.name,
+      client_id: agent!.client.id,
+      client_name: agent!.client.name,
+      identity_scope: agent!.session.scope,
+    };
+  }
+  /**
+   * Connects this session's identity and resumes the room it already belongs to.
+   * Without create, a session that never joined a room stays without an identity.
+   */
+  async function identify(
+    session: Session,
+    create: boolean,
+    signal: AbortSignal,
+  ) {
+    if (agent || !approved || !attempt || state.status !== "ready") return;
+    const active = attempt;
+    const credential = approved;
+    const abort = AbortSignal.any([signal, active.signal]);
+    const identity = await agentCredential(
+      credential,
+      `${server.getClientVersion()?.name ?? "Agent"} · ${hostname()}`.slice(
+        0,
+        80,
+      ),
+      abort,
+      session.key,
+      create,
+    );
+    active.signal.throwIfAborted();
+    if (!identity.client) return;
+    const connected = createRelayConnection(server, {
+      url: credential.url,
+      token: identity.token,
+      report: options.report,
+      fatal: () => {
+        failed(credential.url, active);
+        controlNotice(
+          "connection-rejected",
+          "Agentwire access was rejected. Call agentwire_status once; ask the user before re-enrolling this device.",
+        );
+      },
+    });
+    let membership: Membership | null;
+    try {
+      membership = await connected.resume(abort);
+      active.signal.throwIfAborted();
+    } catch (error) {
+      // The next call retries the whole identification.
+      connected.stop();
+      throw error;
+    }
+    agent = { client: identity.client, session };
+    relay = connected;
+    if (membership) membershipState(membership);
+  }
+  async function joinRoom(join: Join, session: Session, signal: AbortSignal) {
     if (["pending_approval", "connecting"].includes(state.status)) {
-      requestedJoin = join;
+      requestedJoin = { join, session };
       return result({
         ...state,
         requested_room: join.room,
         message: "The room will be joined after device approval. Do not poll.",
       });
     }
-    if (!approved || !attempt || !["ready", "joined"].includes(state.status))
+    if (!approved || !["ready", "joined"].includes(state.status))
       return result(
         {
           ...state,
@@ -172,56 +267,11 @@ ${channelInstructions}`,
         },
         true,
       );
-    joining = true;
-    const active = attempt;
-    const credential = approved;
-    try {
-      const identity =
-        agent ??
-        (await agentCredential(
-          credential,
-          `${server.getClientVersion()?.name ?? "Agent"} · ${hostname()}`.slice(
-            0,
-            80,
-          ),
-          AbortSignal.any([signal, active.signal]),
-        ));
-      active.signal.throwIfAborted();
-      agent = identity;
-      relay ??= createRelayConnection(server, {
-        url: credential.url,
-        token: agent.token,
-        report: options.report,
-        fatal: () => {
-          failed(credential.url, active);
-          controlNotice(
-            "connection-rejected",
-            "Agentwire access was rejected. Call agentwire_status once; ask the user before re-enrolling this device.",
-          );
-        },
-      });
-      const joined = await relay.call("join_room", join, signal);
-      active.signal.throwIfAborted();
-      if (joined.isError) return joined;
-      const membership = joinedSchema.parse(
-        JSON.parse(joined.content[0]!.text),
-      );
-      state = {
-        status: "joined",
-        url: credential.url,
-        room: membership.room,
-        name: membership.name,
-        client_id: agent.client.id,
-        client_name: agent.client.name,
-      };
-      relay.start();
-      return joined;
-    } catch {
-      failed(credential.url, active);
-      return result(state, true);
-    } finally {
-      joining = false;
-    }
+    await identify(session, true, signal);
+    const joined = await relay!.call("join_room", join, signal);
+    if (joined.isError) return joined;
+    membershipState(joinedSchema.parse(JSON.parse(joined.content[0]!.text)));
+    return joined;
   }
   async function ready(
     credential: DeviceCredential,
@@ -231,15 +281,21 @@ ${channelInstructions}`,
     if (active !== attempt || closed || active.signal.aborted) return;
     approved = credential;
     state = { status: "ready", url: credential.url };
-    const join = requestedJoin;
+    const requested = requestedJoin;
     requestedJoin = undefined;
-    if (join) await joinRoom(join, active.signal);
+    let joined = false;
+    if (requested)
+      joined = !(
+        await exclusive(() =>
+          joinRoom(requested.join, requested.session, active.signal),
+        ).catch((error: Error) => result({ error: error.message }, true))
+      ).isError;
     if (active !== attempt || closed || active.signal.aborted) return;
     if (notify)
       controlNotice(
         "device-approved",
-        join
-          ? "Agentwire device approval completed. Call agentwire_status once to check the requested room, then continue your task."
+        requested
+          ? `Agentwire device approval completed. ${joined ? "The requested room was joined" : "Joining the requested room failed"}. Call agentwire_status once, then continue your task.`
           : "Agentwire device approval completed. The plugin is ready; it has not joined a room. Call join_room only for a task the user wants to collaborate on.",
       );
   }
@@ -347,7 +403,7 @@ ${channelInstructions}`,
           };
         return;
       }
-      if (!closed) void setup({ ...settings, reset_device: false });
+      if (!closed) connection = setup({ ...settings, reset_device: false });
     })();
   };
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -355,74 +411,61 @@ ${channelInstructions}`,
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request, context) => {
     await settingsLoaded;
-    if (request.params.name === "agentwire_status") {
-      z.object({})
-        .strict()
-        .parse(request.params.arguments ?? {});
-      return result(state);
-    }
-    if (request.params.name === "setup_agentwire") {
-      try {
-        return await setup(
-          setupSchema.parse(request.params.arguments ?? {}),
-          context.signal,
-        );
-      } catch {
+    const name = request.params.name;
+    const args = request.params.arguments ?? {};
+    const session = sessionFor(request.params._meta);
+    try {
+      if (name === "setup_agentwire") {
+        const busy = configuring;
+        const setting = setup(setupSchema.parse(args), context.signal);
+        if (!busy) connection = setting;
+        return await setting;
+      }
+      // Status reports progress immediately; everything else acts once connected.
+      if (name !== "agentwire_status") await connection;
+      if (name === "join_room") {
+        const join = joinSchema.parse(args);
+        return await exclusive(() => joinRoom(join, session, context.signal));
+      }
+      await exclusive(() => identify(session, false, context.signal));
+      if (name === "agentwire_status") {
+        emptySchema.parse(args);
+        return result(state);
+      }
+      if (name === "leave_room") {
+        emptySchema.parse(args);
+        return await exclusive(async () => {
+          requestedJoin = undefined;
+          if (relay && state.status === "joined") {
+            const left = await relay.call("leave_room", {}, context.signal);
+            if (left.isError) return left;
+          }
+          if (approved) state = { status: "ready", url: approved.url };
+          return result({ ...state, room: null });
+        });
+      }
+      if (!relay || state.status !== "joined")
         return result(
           {
             error:
-              "Invalid Agentwire setup. Supply an HTTPS relay base URL (loopback HTTP is permitted for local testing).",
+              "Join a task room with join_room before messaging or discovering participants. Call agentwire_status once if setup is needed; do not poll.",
+            ...state,
           },
           true,
         );
-      }
-    }
-    if (request.params.name === "join_room") {
-      try {
-        return await joinRoom(
-          joinSchema.parse(request.params.arguments ?? {}),
-          context.signal,
-        );
-      } catch {
-        return result(
-          {
-            error:
-              "Supply a room name of 1–80 letters, numbers, spaces, dots, underscores or hyphens, and optionally a name of 1–80 characters",
-          },
-          true,
-        );
-      }
-    }
-    if (request.params.name === "leave_room") {
-      z.object({})
-        .strict()
-        .parse(request.params.arguments ?? {});
-      if (joining)
-        return result({ error: "A room change is already in progress" }, true);
-      requestedJoin = undefined;
-      if (relay) {
-        const left = await relay.call("leave_room", {}, context.signal);
-        if (left.isError) return left;
-        relay.stop();
-        relay = undefined;
-      }
-      if (approved) state = { status: "ready", url: approved.url };
-      return result({ ...state, room: null });
-    }
-    if (!relay || state.status !== "joined")
+      return await relay.call(name, args, context.signal);
+    } catch (error) {
+      if (error instanceof z.ZodError)
+        return result(invalidArguments(error, schemas[name]), true);
       return result(
         {
-          error:
-            "Join a task room with join_room before messaging or discovering participants. Call agentwire_status once if setup is needed; do not poll.",
           ...state,
+          error:
+            error instanceof Error ? error.message : "Agentwire request failed",
         },
         true,
       );
-    return relay.call(
-      request.params.name,
-      request.params.arguments,
-      context.signal,
-    );
+    }
   });
   function stop() {
     closed = true;

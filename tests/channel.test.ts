@@ -130,12 +130,22 @@ test("actual stdio adapter declares Claude channel capability, pushes compact no
       await a.client.callTool({ name: "read_inbox", arguments: {} }),
     );
     assert.equal(inbox.messages[0].body, secret);
+    assert.equal(inbox.messages[0].from, "ALICE");
+    assert.equal(inbox.messages[0].to, "BOB");
     assert.equal(inbox.pending, 1);
     const invalid = await a.client.callTool({
       name: "send_message",
       arguments: { sender: "owner", body: "spoof" },
     });
     assert.equal(invalid.isError, true);
+    assert.match(toolData(invalid).error, /unknown field "sender"/);
+    assert.deepEqual(toolData(invalid).accepted_fields, [
+      "to",
+      "channel",
+      "body",
+      "reply_to",
+      "idempotency_key",
+    ]);
     const reply = toolData(
       await a.client.callTool({
         name: "send_message",
@@ -147,7 +157,9 @@ test("actual stdio adapter declares Claude channel capability, pushes compact no
         },
       }),
     );
-    assert.equal(reply.sender, "bob");
+    assert.equal(reply.from, "BOB");
+    assert.equal(reply.to, "ALICE");
+    assert.equal(f.store.pending("bob"), 0, "a reply acknowledges its message");
     assert.equal(f.store.inbox("alice")[0]!.body, "Received");
     const sameReply = toolData(
       await a.client.callTool({
@@ -164,12 +176,10 @@ test("actual stdio adapter declares Claude channel capability, pushes compact no
     const directory = toolData(
       await a.client.callTool({ name: "list_clients", arguments: {} }),
     );
-    assert.ok(directory.some((entry: { id: string }) => entry.id === "carol"));
-    await a.client.callTool({
-      name: "acknowledge_messages",
-      arguments: { ids: [sent.id] },
-    });
-    assert.equal(f.store.pending("bob"), 0);
+    assert.deepEqual(
+      directory.find((entry: { name: string }) => entry.name === "CAROL"),
+      { name: "CAROL", kind: "agent", client_name: "CAROL", status: "active" },
+    );
     await f.request("/api/messages", alice, { to: "all", body: "Broadcast" });
     await until(() => a!.notifications.length === 2, 8000);
     assert.equal(f.store.pending("carol"), 2);
@@ -198,20 +208,20 @@ test("startup backlog is coalesced and acknowledgment progresses pages without o
     await until(() => a!.notifications.length === 1);
     assert.deepEqual(a.notifications[0]!.meta, { pending: "25" });
     let lastIds: number[] = [];
-    for (let batch = 0; batch < 4; batch++) {
+    for (let batch = 0; batch < 7; batch++) {
       const inbox = toolData(
         await a.client.callTool({ name: "read_inbox", arguments: {} }),
       );
       lastIds = inbox.messages.map((message: { id: number }) => message.id);
-      assert.ok(lastIds.length > 0 && lastIds.length <= 8);
+      assert.ok(lastIds.length > 0 && lastIds.length <= 4);
       await a.client.callTool({
         name: "acknowledge_messages",
         arguments: { ids: lastIds },
       });
-      if (batch < 3) await until(() => a!.notifications.length === batch + 2);
+      if (batch < 6) await until(() => a!.notifications.length === batch + 2);
     }
     assert.equal(f.store.pending("bob"), 0);
-    assert.equal(a.notifications.length, 4);
+    assert.equal(a.notifications.length, 7);
     await a.client.callTool({
       name: "acknowledge_messages",
       arguments: { ids: lastIds },
@@ -219,7 +229,7 @@ test("startup backlog is coalesced and acknowledgment progresses pages without o
     await new Promise((resolve) => setTimeout(resolve, 100));
     assert.equal(
       a.notifications.length,
-      4,
+      7,
       "idempotent acknowledgment cannot create a notice loop",
     );
   } finally {
@@ -228,7 +238,7 @@ test("startup backlog is coalesced and acknowledgment progresses pages without o
   }
 });
 
-test("a disconnected event stream recovers the durable inbox and adapter restart redelivers until acknowledged", async () => {
+test("a disconnected participant stays addressable while away, and a restarted adapter resumes its room", async () => {
   const f = await fixture();
   let a: Awaited<ReturnType<typeof adapter>> | undefined;
   try {
@@ -242,6 +252,7 @@ test("a disconnected event stream recovers the durable inbox and adapter restart
     });
     await until(() => a!.notifications.length === 1);
     f.hub.disconnect("bob");
+    assert.equal(f.store.membership("bob")?.active, false);
     assert.equal(
       (
         await f.request("/api/messages", alice, {
@@ -249,16 +260,17 @@ test("a disconnected event stream recovers the durable inbox and adapter restart
           body: "While offline",
         })
       ).status,
-      404,
+      201,
     );
     await until(
-      () => f.hub.online("bob") === 1 && f.store.room("bob") === "test-room",
+      () =>
+        f.hub.online("bob") === 1 && f.store.membership("bob")?.active === true,
       8000,
     );
     await until(
       () =>
         a!.notifications.some(
-          (notice, index) => index > 0 && notice.meta.pending === "1",
+          (notice, index) => index > 0 && notice.meta.pending === "2",
         ),
       8000,
     );
@@ -275,14 +287,17 @@ test("a disconnected event stream recovers the durable inbox and adapter restart
     );
     await a.client.close();
     await until(() => f.hub.online("bob") === 0);
-    a = await adapter(f.url, bob);
+    assert.equal(f.store.membership("bob")?.active, false);
+    // The restarted adapter does not join again: the relay hands it the existing membership.
+    a = await adapter(f.url, bob, false);
     await until(() => a!.notifications.length === 1);
+    await until(() => f.store.membership("bob")?.active === true);
     const inbox = toolData(
       await a.client.callTool({ name: "read_inbox", arguments: {} }),
     );
     assert.deepEqual(
       inbox.messages.map((message: { body: string }) => message.body),
-      ["Before disconnect", "After reconnect"],
+      ["Before disconnect", "While offline", "After reconnect"],
     );
   } finally {
     await a?.client.close();
@@ -395,7 +410,7 @@ test("a path-mounted relay serves dashboard, cookies, MCP, and pushed channel to
     assert.ok(
       toolData(
         await a.client.callTool({ name: "list_clients", arguments: {} }),
-      ).some((client: { id: string }) => client.id === "bob"),
+      ).some((client: { name: string }) => client.name === "BOB"),
     );
     assert.ok(
       f.requests.every(

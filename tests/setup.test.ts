@@ -136,7 +136,7 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
       await client.connect(transport);
       await client.callTool({
         name: "join_room",
-        arguments: { room: "test-room" },
+        arguments: { room: "test-room", name },
       });
       const match = /connected as (agent-[a-f0-9]+)/.exec(errors);
       assert.ok(match, errors);
@@ -147,7 +147,7 @@ test("one setup command enrolls the device, preserves Codex/Claude configuration
     assert.notEqual(a.id, b.id);
     const message = await (
       await f.request("/api/messages", ownerToken, {
-        to: b.id,
+        to: "Codex B",
         body: "Only B wakes up",
       })
     ).json();

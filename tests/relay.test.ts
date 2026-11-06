@@ -23,13 +23,19 @@ test("MCP pushes directed and broadcast messages without polling; sender and ses
       arguments: { sender: "owner", to: "bob", body: "spoof" },
     });
     assert.equal(spoof.isError, true);
+    const typed = await a.client.callTool({
+      name: "send_message",
+      arguments: { to: "bob", body: "typed", kind: "question" },
+    });
+    assert.match(toolData(typed).error, /unknown field "kind"/);
     const sent = toolData(
       await a.client.callTool({
         name: "send_message",
-        arguments: { to: "bob", body: "A private question", kind: "question" },
+        arguments: { to: "bob", body: "A private question" },
       }),
     );
-    assert.equal(sent.sender, "alice");
+    assert.equal(sent.from, "ALICE");
+    assert.equal(sent.to, "BOB");
     await until(() => b.notifications.length === 1);
     assert.deepEqual(b.notifications[0], sent);
     assert.equal(a.notifications.length, 0);

@@ -229,11 +229,16 @@ export async function waitForEnrollment(
     if (signal.aborted) abort();
   });
 }
+/**
+ * Derives the agent token for one device-local session. The same session always yields the
+ * same identity; with create false an unknown session returns a null client.
+ */
 export async function agentCredential(
   credential: DeviceCredential,
   name: string,
   signal: AbortSignal,
-  session: string = randomUUID(),
+  session: string,
+  create: boolean,
 ) {
   const token =
     "aw_" +
@@ -241,7 +246,9 @@ export async function agentCredential(
       .update("agentwire-session:" + session)
       .digest("base64url");
   const { client } = z
-    .object({ client: z.object({ id: z.string(), name: z.string() }) })
+    .object({
+      client: z.object({ id: z.string(), name: z.string() }).nullable(),
+    })
     .parse(
       await deviceRequest(
         clientUrl(credential.url),
@@ -251,6 +258,7 @@ export async function agentCredential(
           session,
           name,
           token_hash: createHash("sha256").update(token).digest("hex"),
+          create,
         },
         signal,
       ),

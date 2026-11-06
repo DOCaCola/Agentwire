@@ -176,6 +176,12 @@ test(
       );
       assert.equal(connected.status, "joined");
       assert.match(connected.client_id, /^agent-/);
+      assert.equal(connected.name, "Plugin laptop");
+      assert.equal(
+        connected.identity_scope,
+        "process",
+        "a client without thread metadata gets a process-scoped identity",
+      );
       const credentials = (await readdir(settings)).find((name) =>
         /^[a-f0-9]{64}\.json$/.test(name),
       )!;
@@ -200,7 +206,7 @@ test(
       );
       const sent = await (
         await f.request("/api/messages", ownerToken, {
-          to: connected.client_id,
+          to: "Plugin laptop",
           body: "Plugin directed message",
         })
       ).json();
@@ -242,9 +248,19 @@ test(
         ).error.includes("Join"),
         true,
       );
+      // The device name is taken in this room, so the second agent picks its own.
+      assert.match(
+        toolData(
+          await b.client.callTool({
+            name: "join_room",
+            arguments: { room: "test-room" },
+          }),
+        ).error,
+        /"Plugin laptop" is taken/,
+      );
       await b.client.callTool({
         name: "join_room",
-        arguments: { room: "test-room" },
+        arguments: { room: "test-room", name: "Second" },
       });
       const restored = toolData(
         await b.client.callTool({ name: "agentwire_status", arguments: {} }),
@@ -267,9 +283,7 @@ test(
         await a.client.callTool({ name: "list_clients", arguments: {} }),
       );
       assert.ok(
-        !remaining.some(
-          (peer: { id: string }) => peer.id === restored.client_id,
-        ),
+        !remaining.some((peer: { name: string }) => peer.name === "Second"),
       );
       await b.client.callTool({
         name: "join_room",
@@ -279,14 +293,14 @@ test(
         (
           await a.client.callTool({
             name: "send_message",
-            arguments: { to: restored.client_id, body: "outside" },
+            arguments: { to: "Second", body: "outside" },
           })
         ).isError,
         true,
       );
       await b.client.callTool({
         name: "join_room",
-        arguments: { room: "test-room" },
+        arguments: { room: "test-room", name: "Second" },
       });
       await until(() => changes().length === 2);
       assert.equal(
@@ -364,6 +378,106 @@ test(
     } finally {
       await a?.client.close();
       await b?.client.close();
+      await f.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a Codex thread keeps its identity, room and waiting messages across plugin restarts",
+  { timeout: 15000 },
+  async () => {
+    const f = await fixture();
+    const directory = await mkdtemp(join(tmpdir(), "agentwire-plugin-thread-"));
+    const thread = { threadId: "019a0000-0000-7000-8000-000000000001" };
+    let a: Awaited<ReturnType<typeof plugin>> | undefined;
+    try {
+      a = await plugin(directory);
+      const pending = toolData(
+        await a.client.callTool({
+          name: "setup_agentwire",
+          arguments: { url: f.url, device_name: "Thread laptop" },
+        }),
+      );
+      const device = f.identities.devices(f.store.client("owner")!)[0]!;
+      await f.request(`/api/devices/${device.id}`, ownerToken, {
+        action: "approve",
+        code: pending.approval_code.replace("-", ""),
+      });
+      await until(() =>
+        a!.notices.some((notice) => notice.meta.event === "device-approved"),
+      );
+      // Tool calls before joining look the thread up without creating an agent.
+      await a.client.callTool({
+        name: "agentwire_status",
+        arguments: {},
+        _meta: thread,
+      });
+      assert.equal(
+        f.store.clients().filter((client) => client.kind === "agent").length,
+        0,
+      );
+      await a.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room", name: "Builder" },
+        _meta: thread,
+      });
+      const joined = toolData(
+        await a.client.callTool({
+          name: "agentwire_status",
+          arguments: {},
+          _meta: thread,
+        }),
+      );
+      assert.equal(joined.identity_scope, "thread");
+      await until(() => f.hub.online(joined.client_id) === 1);
+      await a.client.close();
+      await until(() => f.store.membership(joined.client_id)?.active === false);
+      assert.equal(
+        (
+          await f.request("/api/messages", ownerToken, {
+            to: "builder",
+            body: "Sent while the thread was closed",
+          })
+        ).status,
+        201,
+      );
+
+      a = await plugin(directory);
+      // The first call of the resumed thread reconnects it without a rejoin.
+      const inbox = toolData(
+        await a.client.callTool({
+          name: "read_inbox",
+          arguments: {},
+          _meta: thread,
+        }),
+      );
+      assert.deepEqual(
+        inbox.messages.map((message: { from: string; body: string }) => [
+          message.from,
+          message.body,
+        ]),
+        [["Owner", "Sent while the thread was closed"]],
+      );
+      const resumed = toolData(
+        await a.client.callTool({
+          name: "agentwire_status",
+          arguments: {},
+          _meta: thread,
+        }),
+      );
+      assert.deepEqual(
+        [resumed.status, resumed.room, resumed.name, resumed.client_id],
+        ["joined", "test-room", "Builder", joined.client_id],
+      );
+      await until(() => f.store.membership(joined.client_id)?.active === true);
+      assert.equal(
+        f.store.clients().filter((client) => client.kind === "agent").length,
+        1,
+      );
+    } finally {
+      await a?.client.close();
       await f.stop();
       await rm(directory, { recursive: true, force: true });
     }

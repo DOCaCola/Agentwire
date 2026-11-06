@@ -15,11 +15,14 @@ export type Client = {
 };
 /** A room membership; the name is how this client appears inside that room. */
 export type Membership = { room: string; name: string; active: boolean };
+/** Away participants are disconnected members; they keep their name and receive messages. */
+export type Status = "active" | "away";
 export type Participant = {
   id: string;
   name: string;
   kind: string;
   client_name: string;
+  status: Status;
 };
 export type Message = {
   id: number;
@@ -30,7 +33,6 @@ export type Message = {
   room: string | null;
   channel: string;
   body: string;
-  kind: string;
   reply_to: number | null;
   created_at: string;
 };
@@ -45,9 +47,12 @@ export class Problem extends Error {
 export const hashToken = (token: string) =>
   createHash("sha256").update(token).digest("hex");
 export const newToken = () => `aw_${randomBytes(32).toString("base64url")}`;
+/** Memberships of clients that never return are removed after a week away. */
+const awayRetention = 7 * 24 * 60 * 60_000;
+const lease = 60_000;
 
 const columns =
-  "m.id,m.sender,m.sender_name,m.recipient,m.recipient_name,m.room,m.channel,m.body,m.kind,m.reply_to,m.created_at";
+  "m.id,m.sender,m.sender_name,m.recipient,m.recipient_name,m.room,m.channel,m.body,m.reply_to,m.created_at";
 const owned =
   "SELECT :actor UNION SELECT dc.client_id FROM device_clients dc JOIN devices d ON d.id=dc.device_id WHERE d.owner_id=:actor";
 /**
@@ -58,12 +63,14 @@ const owned =
 const visible = `CASE (SELECT kind FROM clients WHERE id=:actor)
   WHEN 'human' THEN m.room IS NOT NULL AND (m.sender IN (${owned})
     OR EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id=m.id AND d.client_id IN (${owned})))
-  ELSE m.room=(SELECT room FROM room_memberships WHERE client_id=:actor AND expires_at>:now)
+  ELSE m.room=(SELECT room FROM room_memberships WHERE client_id=:actor)
     AND (m.sender=:actor OR EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id=m.id AND d.client_id=:actor))
   END`;
 
 export class Store {
   readonly db: DatabaseSync;
+  /** Lease expiries up to this time have already been announced. */
+  private expiredUntil = Date.now();
   constructor(path: string, adminToken: string) {
     mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -134,8 +141,19 @@ export class Store {
         PRAGMA user_version=4;
         COMMIT;`);
     }
+    if (version < 5) {
+      // Memberships now carry stable identities and unique names; everyone joins once more.
+      this.db.exec(`BEGIN IMMEDIATE;
+        DELETE FROM room_memberships;
+        ALTER TABLE messages DROP COLUMN kind;
+        CREATE UNIQUE INDEX room_names ON room_memberships(room, name COLLATE NOCASE);
+        PRAGMA user_version=5;
+        COMMIT;`);
+    }
     // A relay restart cannot prove that previous participants are still alive.
-    this.db.exec("UPDATE room_memberships SET expires_at=0");
+    this.db
+      .prepare("UPDATE room_memberships SET expires_at=MIN(expires_at,?)")
+      .run(this.expiredUntil);
     this.db
       .prepare(
         `INSERT INTO clients(id,name,kind,admin,token_hash) VALUES ('owner','Owner','human',1,?)
@@ -165,16 +183,11 @@ export class Store {
       )
       .all() as Client[];
   }
-  room(actor: string, now = Date.now()): string | undefined {
-    return (
-      this.db
-        .prepare(
-          "SELECT room FROM room_memberships WHERE client_id=? AND expires_at>?",
-        )
-        .get(actor, now) as { room: string } | undefined
-    )?.room;
+  /** The room the actor belongs to, whether active or away. */
+  room(actor: string): string | undefined {
+    return this.membership(actor)?.room;
   }
-  /** The current membership, including one suspended by a disconnect that its client may renew. */
+  /** The current membership, including an away one that its client renews on reconnect. */
   membership(actor: string): Membership | null {
     const row = this.db
       .prepare(
@@ -186,8 +199,8 @@ export class Store {
       ? { room: row.room, name: row.name, active: !!row.active }
       : null;
   }
-  requireRoom(actor: string, now = Date.now()): string {
-    const room = this.room(actor, now);
+  requireRoom(actor: string): string {
+    const room = this.room(actor);
     if (!room)
       throw new Problem(
         409,
@@ -195,20 +208,42 @@ export class Store {
       );
     return room;
   }
-  /** Joining sets the room name; rejoining the same room without a name keeps the current one. */
+  /**
+   * Joining sets the room name; rejoining the same room without a name keeps the current one.
+   * Device agents default to their device name, other clients to their client name.
+   */
   joinRoom(actor: string, input: unknown): { room: string; name: string } {
     const data = joinSchema.parse(input);
     const client = this.client(actor);
     if (!client) throw new Problem(401, "Client revoked");
     const current = this.membership(actor);
+    const device = this.db
+      .prepare(
+        "SELECT d.name FROM device_clients dc JOIN devices d ON d.id=dc.device_id WHERE dc.client_id=?",
+      )
+      .get(actor) as { name: string } | undefined;
     const name =
-      data.name ?? (current?.room === data.room ? current.name : client.name);
+      data.name ??
+      (current?.room === data.room
+        ? current.name
+        : (device?.name ?? client.name));
+    const holder = this.db
+      .prepare(
+        "SELECT expires_at>? AS active FROM room_memberships WHERE room=? AND name=? COLLATE NOCASE AND client_id<>?",
+      )
+      .get(Date.now(), data.room, name, actor) as
+      { active: number } | undefined;
+    if (holder)
+      throw new Problem(
+        409,
+        `The name "${name}" is taken in room "${data.room}" by ${holder.active ? "an active" : "an away"} participant. Join with another name${holder.active ? "" : ", or have its owner revoke that agent in the dashboard"}.`,
+      );
     this.db
       .prepare(
         `INSERT INTO room_memberships(client_id,room,name,expires_at) VALUES (?,?,?,?)
       ON CONFLICT(client_id) DO UPDATE SET room=excluded.room,name=excluded.name,expires_at=excluded.expires_at`,
       )
-      .run(actor, data.room, name, Date.now() + 60_000);
+      .run(actor, data.room, name, Date.now() + lease);
     return { room: data.room, name };
   }
   leaveRoom(actor: string): void {
@@ -223,32 +258,39 @@ export class Store {
           .prepare(
             "UPDATE room_memberships SET expires_at=? WHERE client_id=? AND room=?",
           )
-          .run(Date.now() + 60_000, actor, room).changes,
+          .run(Date.now() + lease, actor, room).changes,
       ) > 0
     );
   }
+  /** Marks the membership away from now on; the member keeps its name and inbox. */
   suspendRoom(actor: string): void {
     this.db
-      .prepare("UPDATE room_memberships SET expires_at=0 WHERE client_id=?")
-      .run(actor);
+      .prepare(
+        "UPDATE room_memberships SET expires_at=MIN(expires_at,?) WHERE client_id=?",
+      )
+      .run(Date.now(), actor);
   }
+  /** Reports whether any lease lapsed or away membership was removed since the last call. */
   expireRooms(): boolean {
-    return (
-      Number(
-        this.db
-          .prepare(
-            "UPDATE room_memberships SET expires_at=0 WHERE expires_at>0 AND expires_at<=?",
-          )
-          .run(Date.now()).changes,
-      ) > 0
-    );
+    const now = Date.now();
+    const lapsed = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM room_memberships WHERE expires_at>? AND expires_at<=?",
+      )
+      .get(this.expiredUntil, now) as { count: number };
+    this.expiredUntil = now;
+    const removed = this.db
+      .prepare("DELETE FROM room_memberships WHERE expires_at<?")
+      .run(now - awayRetention).changes;
+    return lapsed.count > 0 || Number(removed) > 0;
   }
-  /** Active participants of every room, as they named themselves in that room. */
+  /** Participants of every room, as they named themselves in that room. */
   presence(): (Participant & { room: string })[] {
     return this.db
       .prepare(
-        `SELECT r.room,c.id,r.name,c.kind,c.name AS client_name FROM clients c
-      JOIN room_memberships r ON r.client_id=c.id WHERE c.revoked=0 AND r.expires_at>?
+        `SELECT r.room,c.id,r.name,c.kind,c.name AS client_name,
+        CASE WHEN r.expires_at>? THEN 'active' ELSE 'away' END AS status FROM clients c
+      JOIN room_memberships r ON r.client_id=c.id WHERE c.revoked=0
       ORDER BY r.room,r.name COLLATE NOCASE,c.id LIMIT 1000`,
       )
       .all(Date.now()) as (Participant & { room: string })[];
@@ -307,13 +349,19 @@ export class Store {
       .prepare(
         `SELECT ${columns} FROM messages m WHERE m.id=:id AND ${visible}`,
       )
-      .get({ id, actor, now: Date.now() }) as Message | undefined;
+      .get({ id, actor }) as Message | undefined;
   }
-  send(actor: Client, input: unknown): { message: Message; fresh: boolean } {
+  /**
+   * Stores a message for every addressed member of the sender's room, active or away.
+   * A reply also acknowledges the sender's delivery of the message it answers.
+   */
+  send(
+    actor: Client,
+    input: unknown,
+  ): { message: Message; fresh: boolean; acknowledged: number } {
     const data = sendSchema.parse(input);
-    const now = Date.now();
     if (!this.client(actor.id)) throw new Problem(401, "Client revoked");
-    const room = this.requireRoom(actor.id, now);
+    const room = this.requireRoom(actor.id);
     if (data.reply_to && this.message(actor.id, data.reply_to)?.room !== room)
       throw new Problem(404, "Reply message not found");
     const request = JSON.stringify({ ...data, room });
@@ -333,35 +381,41 @@ export class Store {
         return {
           message: this.sentMessage(actor.id, old.id, room),
           fresh: false,
+          acknowledged: 0,
         };
       }
     }
     const sender = this.membership(actor.id)!;
-    const recipient = data.to === "all" ? undefined : this.membership(data.to);
-    if (
-      data.to !== "all" &&
-      (!this.client(data.to) || this.room(data.to, now) !== room)
-    )
+    const broadcast = data.to.toLowerCase() === "all";
+    const recipient = broadcast
+      ? undefined
+      : (this.db
+          .prepare(
+            "SELECT r.client_id AS id,r.name FROM room_memberships r JOIN clients c ON c.id=r.client_id WHERE c.revoked=0 AND r.room=? AND r.name=? COLLATE NOCASE",
+          )
+          .get(room, data.to) as { id: string; name: string } | undefined);
+    if (!broadcast && !recipient)
       throw new Problem(
         404,
-        "Recipient is not an active participant in this room",
+        `No participant named "${data.to}" in room "${room}". Call list_clients for the current names.`,
       );
+    if (recipient?.id === actor.id)
+      throw new Problem(400, "You cannot send a message to yourself");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = this.db
         .prepare(
-          `INSERT INTO messages(sender,sender_name,recipient,recipient_name,room,channel,body,kind,reply_to,idempotency_key,request_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          `INSERT INTO messages(sender,sender_name,recipient,recipient_name,room,channel,body,reply_to,idempotency_key,request_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           actor.id,
           sender.name,
-          data.to === "all" ? null : data.to,
+          recipient?.id ?? null,
           recipient?.name ?? null,
           room,
           data.channel,
           data.body,
-          data.kind,
           data.reply_to ?? null,
           data.idempotency_key ?? null,
           request,
@@ -370,11 +424,25 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO deliveries(message_id,client_id)
-        SELECT ?,c.id FROM clients c JOIN room_memberships r ON r.client_id=c.id WHERE c.revoked=0 AND c.id<>? AND (?='all' OR c.id=?) AND r.room=? AND r.expires_at>?`,
+        SELECT ?,c.id FROM clients c JOIN room_memberships r ON r.client_id=c.id WHERE c.revoked=0 AND c.id<>? AND (? OR c.id=?) AND r.room=?`,
         )
-        .run(id, actor.id, data.to, data.to, room, now);
+        .run(id, actor.id, Number(broadcast), recipient?.id ?? null, room);
+      const acknowledged = data.reply_to
+        ? Number(
+            this.db
+              .prepare(
+                `UPDATE deliveries SET acked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+            WHERE message_id=? AND client_id=? AND acked_at IS NULL`,
+              )
+              .run(data.reply_to, actor.id).changes,
+          )
+        : 0;
       this.db.exec("COMMIT");
-      return { message: this.sentMessage(actor.id, id, room), fresh: true };
+      return {
+        message: this.sentMessage(actor.id, id, room),
+        fresh: true,
+        acknowledged,
+      };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -395,7 +463,7 @@ export class Store {
         .prepare(
           `SELECT ${columns} FROM messages m WHERE m.room=:room AND ${visible} ORDER BY m.id DESC LIMIT :limit`,
         )
-        .all({ room, actor, now: Date.now(), limit }) as Message[]
+        .all({ room, actor, limit }) as Message[]
     ).reverse();
   }
   /** The latest visible message of every room the actor can see. */
@@ -406,16 +474,16 @@ export class Store {
         SELECT MAX(m.id) FROM messages m WHERE ${visible} GROUP BY m.room
       ) ORDER BY m.id DESC LIMIT 200`,
       )
-      .all({ actor, now: Date.now() }) as Message[];
+      .all({ actor }) as Message[];
   }
   since(actor: string, after: number, limit = 101): Message[] {
     return this.db
       .prepare(
         `SELECT ${columns} FROM messages m WHERE m.id>:after AND ${visible} ORDER BY m.id LIMIT :limit`,
       )
-      .all({ after, actor, now: Date.now(), limit }) as Message[];
+      .all({ after, actor, limit }) as Message[];
   }
-  inbox(actor: string, limit = 8): Message[] {
+  inbox(actor: string, limit = 4): Message[] {
     return this.db
       .prepare(
         `SELECT ${columns}

@@ -7,6 +7,7 @@ import {
   enrollDevice,
 } from "./device-client.js";
 import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 
 let adapter: ReturnType<typeof createChannelAdapter> | undefined;
 const shutdown = new AbortController();
@@ -31,6 +32,9 @@ try {
       (message) => console.error(message),
       shutdown.signal,
     );
+    // AGENTWIRE_SESSION names a stable identity that survives restarts; without it the
+    // identity lives as long as this process.
+    const configured = process.env.AGENTWIRE_SESSION;
     const session = await agentCredential(
       credential,
       `${process.env.AGENTWIRE_AGENT_NAME ?? "Agent"} · ${hostname()}`.slice(
@@ -38,11 +42,12 @@ try {
         80,
       ),
       shutdown.signal,
-      process.env.AGENTWIRE_SESSION,
+      configured ?? "process:" + randomUUID(),
+      true,
     );
     token = session.token;
     console.error(
-      `Agentwire connected as ${session.client.id} (${session.client.name}).`,
+      `Agentwire connected as ${session.client!.id} (${session.client!.name}) with a ${configured ? "stable" : "process-scoped"} identity.`,
     );
   }
   adapter = createChannelAdapter({

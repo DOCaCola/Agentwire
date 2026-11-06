@@ -118,46 +118,59 @@ test("only explicit room participants can discover, address, receive, reply to o
   }
 });
 
-test("disconnects and expired presence remove participants without losing their durable deliveries", async () => {
+test("disconnected and lapsed participants stay members as away and keep receiving", async () => {
   const f = await fixture();
   try {
     const alice = await f.add("alice", "MyTask"),
       bob = await f.add("bob", "MyTask");
     const b = await f.mcp(bob, "MyTask");
-    const message = await (
-      await f.request("/api/messages", alice, { to: "bob", body: "durable" })
-    ).json();
+    await f.request("/api/messages", alice, { to: "bob", body: "durable" });
     await until(() => b.notifications.length === 1);
     await b.client.close();
     await until(() => f.hub.online("bob") === 0);
-    assert.equal(f.store.room("bob"), undefined);
+    assert.deepEqual(f.store.membership("bob"), {
+      room: "MyTask",
+      name: "BOB",
+      active: false,
+    });
     assert.deepEqual(
-      f.store.participants("alice").map((c) => c.id),
-      ["alice"],
+      f.store.participants("alice").map((c) => [c.name, c.status]),
+      [
+        ["ALICE", "active"],
+        ["BOB", "away"],
+      ],
     );
     assert.equal(
       (await f.request("/api/messages", alice, { to: "bob", body: "offline" }))
         .status,
-      404,
+      201,
     );
-    await f.request("/api/rooms/join", bob, { room: "MyTask" });
-    assert.equal(f.store.inbox("bob")[0]!.id, message.id);
-    f.store.db
-      .prepare("UPDATE room_memberships SET expires_at=? WHERE client_id='bob'")
-      .run(Date.now() - 1);
     assert.deepEqual(
-      f.store.participants("alice").map((c) => c.id),
-      ["alice"],
+      f.store.inbox("bob").map((message) => message.body),
+      ["durable", "offline"],
     );
-    assert.equal(f.store.expireRooms(), true);
     assert.equal(
       (await f.request("/api/rooms/heartbeat", bob, { room: "WrongTask" }))
         .status,
       409,
     );
     await f.request("/api/rooms/heartbeat", bob, { room: "MyTask" });
-    assert.equal(f.store.room("bob"), "MyTask");
-    assert.equal(f.store.inbox("bob")[0]!.id, message.id);
+    assert.equal(f.store.membership("bob")!.active, true);
+    // A lapsed lease is announced once and leaves the membership in place.
+    f.store.expireRooms();
+    f.store.db
+      .prepare("UPDATE room_memberships SET expires_at=? WHERE client_id='bob'")
+      .run(Date.now() + 20);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(f.store.expireRooms(), true);
+    assert.equal(f.store.expireRooms(), false);
+    assert.equal(f.store.membership("bob")!.active, false);
+    // Memberships away for over a week are removed.
+    f.store.db
+      .prepare("UPDATE room_memberships SET expires_at=? WHERE client_id='bob'")
+      .run(Date.now() - 8 * 24 * 60 * 60_000);
+    assert.equal(f.store.expireRooms(), true);
+    assert.equal(f.store.membership("bob"), null);
   } finally {
     await f.stop();
   }
@@ -190,17 +203,55 @@ test("participants choose a name per room and messages keep the names used when 
       ],
     );
     const sent = await (
-      await f.request("/api/messages", bob, { to: "alice", body: "hi" })
+      await f.request("/api/messages", bob, { to: "PLANNER", body: "hi" })
     ).json();
     assert.equal(sent.sender_name, "BOB");
     assert.equal(sent.recipient_name, "Planner");
+    assert.equal(
+      (await f.request("/api/messages", bob, { to: "alice", body: "hi" }))
+        .status,
+      404,
+      "participants are addressed by room name",
+    );
+    assert.equal(
+      (await f.request("/api/messages", bob, { to: "bob", body: "me" })).status,
+      400,
+    );
+    const taken = await f.request("/api/rooms/join", bob, {
+      room: "MyTask",
+      name: "planner",
+    });
+    assert.equal(taken.status, 409);
+    assert.match((await taken.json()).error, /"planner" is taken/);
+    assert.equal(
+      (
+        await f.request("/api/rooms/join", bob, {
+          room: "MyTask",
+          name: "All",
+        })
+      ).status,
+      400,
+    );
+    // Answering a message acknowledges it for the replying participant.
+    const answer = await (
+      await f.request("/api/messages", alice, {
+        to: "bob",
+        body: "thanks",
+        reply_to: sent.id,
+      })
+    ).json();
+    assert.equal(answer.reply_to, sent.id);
+    assert.equal(f.store.pending("alice"), 0);
     await f.request("/api/rooms/join", alice, { room: "MyTask" });
     assert.equal(f.store.membership("alice")!.name, "Planner");
     await f.request("/api/rooms/join", alice, {
       room: "MyTask",
       name: "Reviewer",
     });
-    assert.equal(f.store.inbox("alice")[0]!.recipient_name, "Planner");
+    assert.equal(
+      f.store.transcript("alice", "MyTask")[0]!.recipient_name,
+      "Planner",
+    );
     assert.equal(
       f.store.participants("bob").find((p) => p.id === "alice")!.name,
       "Reviewer",
@@ -239,10 +290,10 @@ test("MCP room joins return discoverable peers, switch atomically and reject unj
       }),
     );
     assert.equal(joined.room, "MyTask");
-    assert.deepEqual(
-      joined.participants.map((p: { id: string }) => p.id),
-      ["agent", "peer"],
-    );
+    assert.deepEqual(joined.participants, [
+      { name: "AGENT", kind: "agent", client_name: "AGENT", status: "active" },
+      { name: "PEER", kind: "agent", client_name: "PEER", status: "active" },
+    ]);
     const switched = toolData(
       await agent.client.callTool({
         name: "join_room",
@@ -250,8 +301,8 @@ test("MCP room joins return discoverable peers, switch atomically and reject unj
       }),
     );
     assert.deepEqual(
-      switched.participants.map((p: { id: string }) => p.id),
-      ["agent"],
+      switched.participants.map((p: { name: string }) => p.name),
+      ["AGENT"],
     );
     await agent.client.callTool({ name: "leave_room", arguments: {} });
     assert.equal(f.store.room("agent"), undefined);
@@ -320,7 +371,11 @@ test("version 2 databases retain historical messages without exposing them in a 
   try {
     assert.equal(
       f.store.db.prepare("PRAGMA user_version").get()!.user_version,
-      4,
+      5,
+    );
+    assert.throws(
+      () => f.store.db.prepare("SELECT kind FROM messages").get(),
+      /no such column/,
     );
     assert.deepEqual(f.store.latest("owner"), []);
     const old = f.store.db.prepare("SELECT body,room FROM messages").get()!;
