@@ -36,9 +36,11 @@ Restart the client, select Agentwire if your client requires plugin selection, t
 
 Tell each agent **“Join room MyTask”**, optionally with a role: **“Join room MyTask as Reviewer”**. The `join_room` tool creates or joins that exact task name and returns its participants. Room names are case-sensitive. The optional `name` is how the agent appears in that room and how peers address it; it defaults to the device name. Names are unique per room, ignoring case, and `all` is reserved. `list_clients` lists only that room, and `to: "all"` broadcasts only to its participants. Joining a different room switches membership; `leave_room` removes the participant. The dashboard has the same explicit room controls for people.
 
-The plugin provides `setup_agentwire` and `agentwire_status` plus the six room and messaging tools below. Future chats restore the saved relay URL and reuse device approval, but never automatically join a room. An approved plugin stays ready and creates no agent identity until an explicit join. A join requested during setup or approval completes after approval. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
+The plugin provides `setup_agentwire`, `agentwire_status` and `adopt_participant` plus the six room and messaging tools below. Future chats restore the saved relay URL and reuse device approval, but never automatically join a room. An approved plugin stays ready and creates no agent identity until an explicit join. A join requested during setup or approval completes after approval. Plugin settings are saved in `~/.config/agentwire/plugin.json` and credentials remain in the same protected device directory used by the standalone CLI, outside the replaceable plugin cache. An explicit `reset_device` request replaces the device credential and requires fresh dashboard approval.
 
 Each Codex chat thread has one agent identity. Codex sends the thread ID with every tool call, and the plugin derives the identity from it, so the identity, its room membership and its inbox survive plugin restarts, app restarts, reboots and thread resumes. A restarted plugin reconnects on the thread's first Agentwire call; until then the participant is listed as away and messages wait in its inbox. Clients that send no thread ID get an identity for the lifetime of the MCP process. `agentwire_status` reports the scope as `identity_scope`: `thread` or `process`.
+
+A forked or handed-off thread gets its own identity. When the user wants it to continue as an existing participant, ask it to **“adopt Builder in room MyTask”**: `adopt_participant {room, name}` moves that participant's identity, room name and waiting messages to the calling thread. The previous holder receives an `identity-adopted` notice and leaves the room, and a participant the adopting thread held before is retired. Only agents on devices approved by the same person can be adopted, and joining under a taken name never adopts implicitly.
 
 When migrating from a manually configured Agentwire MCP server, remove that user-defined server with `codex mcp remove agentwire` before enabling the plugin. This prevents the manual declaration from overriding the plugin or creating a duplicate adapter. Keep the device credential files so the plugin reuses the approval. If another `codex` executable on PATH is stock Codex, invoke your DOCa executable explicitly.
 
@@ -49,7 +51,7 @@ The Git marketplace contains `plugins/agentwire/mcp/agentwire.cjs`, a generated,
 Install Node 24.13+ (below 27), then install the prebuilt Agentwire release from GitHub:
 
 ```sh
-npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.6.0/agentwire-0.6.0.tgz
+npm install --global https://github.com/DOCaCola/Agentwire/releases/download/v0.7.0/agentwire-0.7.0.tgz
 agentwire setup --url https://agentwire.example.com/ --client codex
 ```
 
@@ -204,15 +206,16 @@ Use SQLite's online backup API for a consistent snapshot while the relay is runn
 
 All endpoints are relative to the relay base URL. Existing message endpoints require a client bearer token or dashboard session, except login and health. Device credentials authenticate only the enrollment stream and device-client creation endpoint. Human-only device decisions require an authenticated person; code approval also requires the code displayed on the enrolling device.
 
-| Endpoint                                | Behavior                                                                                            |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `GET /api/auth`                         | Public login configuration.                                                                         |
-| `GET /auth/login`, `GET /auth/callback` | OpenID authorization-code flow.                                                                     |
-| `POST /api/enrollment`                  | Public: submit `{name, token_hash}`; receive approval instructions.                                 |
-| `GET /api/enrollment/events`            | Device bearer: pending/approved/denied/revoked/expired SSE status.                                  |
-| `POST /api/device/clients`              | Approved device bearer: resume `{session, name, token_hash, create}`; `create` makes a missing one. |
-| `GET /api/devices`                      | Person: pending requests and own devices; admins see all.                                           |
-| `POST /api/devices/:id`                 | Person: `{action: "approve", code}`, `deny`, or own-device `revoke`.                                |
+| Endpoint                                | Behavior                                                                                                |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `GET /api/auth`                         | Public login configuration.                                                                             |
+| `GET /auth/login`, `GET /auth/callback` | OpenID authorization-code flow.                                                                         |
+| `POST /api/enrollment`                  | Public: submit `{name, token_hash}`; receive approval instructions.                                     |
+| `GET /api/enrollment/events`            | Device bearer: pending/approved/denied/revoked/expired SSE status.                                      |
+| `POST /api/device/clients`              | Approved device bearer: resume `{session, name, token_hash, create}`; `create` makes a missing one.     |
+| `POST /api/device/clients/adopt`        | Approved device bearer: move `{room, participant}` of the same person to `{session, name, token_hash}`. |
+| `GET /api/devices`                      | Person: pending requests and own devices; admins see all.                                               |
+| `POST /api/devices/:id`                 | Person: `{action: "approve", code}`, `deny`, or own-device `revoke`.                                    |
 
 | Endpoint                        | Behavior                                                                                                                            |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |

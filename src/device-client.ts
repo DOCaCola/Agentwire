@@ -229,9 +229,22 @@ export async function waitForEnrollment(
     if (signal.aborted) abort();
   });
 }
+const clientSchema = z.object({ id: z.string(), name: z.string() });
+/** The agent token of one device-local session; the same session always yields the same token. */
+function sessionToken(credential: DeviceCredential, session: string) {
+  const token =
+    "aw_" +
+    createHmac("sha256", credential.token)
+      .update("agentwire-session:" + session)
+      .digest("base64url");
+  return {
+    token,
+    token_hash: createHash("sha256").update(token).digest("hex"),
+  };
+}
 /**
- * Derives the agent token for one device-local session. The same session always yields the
- * same identity; with create false an unknown session returns a null client.
+ * Looks up, or with create mints, the agent identity of one device-local session.
+ * With create false an unknown session returns a null client.
  */
 export async function agentCredential(
   credential: DeviceCredential,
@@ -240,28 +253,43 @@ export async function agentCredential(
   session: string,
   create: boolean,
 ) {
-  const token =
-    "aw_" +
-    createHmac("sha256", credential.token)
-      .update("agentwire-session:" + session)
-      .digest("base64url");
+  const { token, token_hash } = sessionToken(credential, session);
   const { client } = z
-    .object({
-      client: z.object({ id: z.string(), name: z.string() }).nullable(),
-    })
+    .object({ client: clientSchema.nullable() })
     .parse(
       await deviceRequest(
         clientUrl(credential.url),
         "api/device/clients",
         credential.token,
-        {
-          session,
-          name,
-          token_hash: createHash("sha256").update(token).digest("hex"),
-          create,
-        },
+        { session, name, token_hash, create },
         signal,
       ),
     );
+  return { token, client };
+}
+/** Takes over a room participant of the same person for this session. */
+export async function adoptParticipant(
+  credential: DeviceCredential,
+  name: string,
+  signal: AbortSignal,
+  session: string,
+  participant: { room: string; name: string },
+) {
+  const { token, token_hash } = sessionToken(credential, session);
+  const { client } = z.object({ client: clientSchema }).parse(
+    await deviceRequest(
+      clientUrl(credential.url),
+      "api/device/clients/adopt",
+      credential.token,
+      {
+        session,
+        name,
+        token_hash,
+        room: participant.room,
+        participant: participant.name,
+      },
+      signal,
+    ),
+  );
   return { token, client };
 }

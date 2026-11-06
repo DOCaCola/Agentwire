@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
+import { participantName, roomName } from "./protocol.js";
 import { hashToken, Problem, type Client, type Store } from "./store.js";
 
 export type Device = {
@@ -12,6 +13,11 @@ export type Device = {
   created_at: string;
 };
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const sessionFields = {
+  session: z.string().min(1).max(128),
+  name: z.string().trim().min(1).max(80),
+  token_hash: digest,
+};
 
 /** Enrollment credentials can enroll agents, but cannot read or send messages. */
 export class IdentityStore {
@@ -171,27 +177,28 @@ export class IdentityStore {
    * Maps a device-local session, such as a Codex thread, to one stable agent identity.
    * Without create, an unknown session yields null so lookups never mint identities.
    */
-  session(device: Device, input: unknown): Client | null {
+  private authorize(device: Device) {
     if (
       device.status !== "approved" ||
       !device.owner_id ||
       !this.store.client(device.owner_id)
     )
       throw new Problem(403, "Device is not authorized");
-    const data = z
-      .object({
-        session: z.string().min(1).max(128),
-        name: z.string().trim().min(1).max(80),
-        token_hash: digest,
-        create: z.boolean(),
-      })
-      .strict()
-      .parse(input);
-    const existing = this.store.db
+  }
+  private mapped(device: Device, session: string) {
+    return this.store.db
       .prepare(
         "SELECT client_id FROM device_clients WHERE device_id=? AND session_key=?",
       )
-      .get(device.id, data.session) as { client_id: string } | undefined;
+      .get(device.id, session) as { client_id: string } | undefined;
+  }
+  session(device: Device, input: unknown): Client | null {
+    this.authorize(device);
+    const data = z
+      .object({ ...sessionFields, create: z.boolean() })
+      .strict()
+      .parse(input);
+    const existing = this.mapped(device, data.session);
     if (existing) {
       const client = this.store.client(existing.client_id);
       if (!client) throw new Problem(403, "Agent session revoked");
@@ -229,6 +236,67 @@ export class IdentityStore {
       throw error;
     }
     return this.store.client(id)!;
+  }
+  /**
+   * Moves an agent identity, with its room name and inbox, to another device session, such as
+   * a forked or handed-off thread. Only agents on approved devices of the same person qualify.
+   * The session that held it loses it; a participant the adopting session held before is retired.
+   */
+  adopt(
+    device: Device,
+    input: unknown,
+  ): { client: Client; replaced: string | null } {
+    this.authorize(device);
+    const data = z
+      .object({
+        ...sessionFields,
+        room: roomName,
+        participant: participantName,
+      })
+      .strict()
+      .parse(input);
+    const target = this.store.db
+      .prepare(
+        `SELECT m.client_id FROM room_memberships m
+        JOIN device_clients dc ON dc.client_id=m.client_id JOIN devices d ON d.id=dc.device_id
+        JOIN clients c ON c.id=m.client_id
+        WHERE m.room=? AND m.name=? COLLATE NOCASE AND d.owner_id=? AND d.status='approved' AND c.revoked=0`,
+      )
+      .get(data.room, data.participant, device.owner_id) as
+      { client_id: string } | undefined;
+    if (!target)
+      throw new Problem(
+        404,
+        `None of your agents is named "${data.participant}" in room "${data.room}"`,
+      );
+    const current = this.mapped(device, data.session)?.client_id ?? null;
+    if (current === target.client_id)
+      return { client: this.store.client(current)!, replaced: null };
+    this.store.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (current) {
+        // The retired identity stays attributed to this device for message history.
+        this.store.revoke(current);
+        this.store.db
+          .prepare(
+            "UPDATE device_clients SET session_key='retired:'||client_id WHERE client_id=?",
+          )
+          .run(current);
+      }
+      this.store.db
+        .prepare(
+          "UPDATE device_clients SET device_id=?,session_key=? WHERE client_id=?",
+        )
+        .run(device.id, data.session, target.client_id);
+      this.store.db
+        .prepare("UPDATE clients SET name=?,token_hash=? WHERE id=?")
+        .run(data.name, data.token_hash, target.client_id);
+      this.store.db.exec("COMMIT");
+    } catch (error) {
+      this.store.db.exec("ROLLBACK");
+      throw error;
+    }
+    return { client: this.store.client(target.client_id)!, replaced: current };
   }
   children(id: string): string[] {
     return (

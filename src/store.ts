@@ -142,9 +142,13 @@ export class Store {
         COMMIT;`);
     }
     if (version < 5) {
-      // Memberships now carry stable identities and unique names; everyone joins once more.
+      // Names become unique per room. The most recently present holder of a name keeps it;
+      // older duplicates, which are away members from earlier sessions, leave the room.
       this.db.exec(`BEGIN IMMEDIATE;
-        DELETE FROM room_memberships;
+        DELETE FROM room_memberships WHERE client_id IN (
+          SELECT client_id FROM (SELECT client_id, ROW_NUMBER() OVER (
+            PARTITION BY room, lower(name) ORDER BY expires_at DESC, client_id) AS rank
+          FROM room_memberships) WHERE rank>1);
         ALTER TABLE messages DROP COLUMN kind;
         CREATE UNIQUE INDEX room_names ON room_memberships(room, name COLLATE NOCASE);
         PRAGMA user_version=5;
@@ -236,7 +240,7 @@ export class Store {
     if (holder)
       throw new Problem(
         409,
-        `The name "${name}" is taken in room "${data.room}" by ${holder.active ? "an active" : "an away"} participant. Join with another name${holder.active ? "" : ", or have its owner revoke that agent in the dashboard"}.`,
+        `The name "${name}" is taken in room "${data.room}" by ${holder.active ? "an active" : "an away"} participant. Join with another name. Only if the user asks this thread to continue as that participant, adopt it with adopt_participant.`,
       );
     this.db
       .prepare(

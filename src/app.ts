@@ -209,6 +209,18 @@ export function createAgentwire(options: Options) {
     const client = identities.session(deviceCredential(req), req.body);
     res.json({ client });
   });
+  app.post("/api/device/clients/adopt", async (req, res) => {
+    const { client, replaced } = identities.adopt(
+      deviceCredential(req),
+      req.body,
+    );
+    // The previous holder learns why it is disconnected before its credential stops working.
+    hub.publish({ type: "adopted" }, client.id);
+    await Promise.all(
+      [client.id, ...(replaced ? [replaced] : [])].map(disconnect),
+    );
+    res.json({ client });
+  });
   app.post("/api/login", (req, res) => {
     const { token } = z
       .object({ token: z.string().min(32).max(256) })
@@ -426,6 +438,7 @@ export function createAgentwire(options: Options) {
       client: client.id,
       close: () => res.end(),
       send: (event) => {
+        if (event.type === "adopted") send("adopted", {});
         if (event.type === "clients") send("participants", roster());
         if (
           event.type === "inbox" ||

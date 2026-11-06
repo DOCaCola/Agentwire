@@ -86,6 +86,7 @@ test(
           "read_inbox",
           "acknowledge_messages",
           "list_clients",
+          "adopt_participant",
         ],
       );
       assert.deepEqual(
@@ -484,6 +485,182 @@ test(
   },
 );
 
+test(
+  "a thread adopts another thread's participant only on request, and the previous holder is told",
+  { timeout: 15000 },
+  async () => {
+    const f = await fixture();
+    const directory = await mkdtemp(join(tmpdir(), "agentwire-plugin-adopt-"));
+    const original = { threadId: "019a0000-0000-7000-8000-00000000000a" };
+    const fork = { threadId: "019a0000-0000-7000-8000-00000000000b" };
+    let a: Awaited<ReturnType<typeof plugin>> | undefined,
+      b: Awaited<ReturnType<typeof plugin>> | undefined;
+    try {
+      a = await plugin(directory);
+      const pending = toolData(
+        await a.client.callTool({
+          name: "setup_agentwire",
+          arguments: { url: f.url, device_name: "Fork laptop" },
+        }),
+      );
+      const device = f.identities.devices(f.store.client("owner")!)[0]!;
+      await f.request(`/api/devices/${device.id}`, ownerToken, {
+        action: "approve",
+        code: pending.approval_code.replace("-", ""),
+      });
+      await until(() =>
+        a!.notices.some((notice) => notice.meta.event === "device-approved"),
+      );
+      const builder = toolData(
+        await a.client.callTool({
+          name: "join_room",
+          arguments: { room: "test-room", name: "Builder" },
+          _meta: original,
+        }),
+      );
+      assert.equal(builder.name, "Builder");
+      const first = toolData(
+        await a.client.callTool({
+          name: "agentwire_status",
+          arguments: {},
+          _meta: original,
+        }),
+      );
+      await until(() => f.hub.online(first.client_id) === 1);
+
+      b = await plugin(directory);
+      await b.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room", name: "Helper" },
+        _meta: fork,
+      });
+      const helper = toolData(
+        await b.client.callTool({
+          name: "agentwire_status",
+          arguments: {},
+          _meta: fork,
+        }),
+      );
+      // Joining under a held name never takes it over implicitly.
+      const taken = await b.client.callTool({
+        name: "join_room",
+        arguments: { room: "test-room", name: "builder" },
+        _meta: fork,
+      });
+      assert.equal(taken.isError, true);
+      assert.match(toolData(taken).error, /adopt_participant/);
+      assert.equal(
+        (
+          await b.client.callTool({
+            name: "adopt_participant",
+            arguments: { room: "test-room", name: "Nobody" },
+            _meta: fork,
+          })
+        ).isError,
+        true,
+      );
+
+      // A participant of another person's device cannot be adopted.
+      const stranger = f.identities.human(
+        "https://idp",
+        "stranger",
+        "Eve",
+        false,
+      );
+      const foreign = f.identities.enroll({
+        name: "Eve laptop",
+        token_hash: "e".repeat(64),
+      });
+      f.identities.decide(stranger, foreign.id, {
+        action: "approve",
+        code: foreign.user_code,
+      });
+      const eve = f.identities.session(f.identities.device(foreign.id)!, {
+        session: "eve",
+        name: "Eve agent",
+        token_hash: "f".repeat(64),
+        create: true,
+      })!;
+      f.store.joinRoom(eve.id, { room: "test-room", name: "Reviewer" });
+      assert.equal(
+        (
+          await b.client.callTool({
+            name: "adopt_participant",
+            arguments: { room: "test-room", name: "Reviewer" },
+            _meta: fork,
+          })
+        ).isError,
+        true,
+      );
+
+      await f.request("/api/messages", ownerToken, {
+        to: "Builder",
+        body: "Waiting for whoever continues as Builder",
+      });
+      const adopted = toolData(
+        await b.client.callTool({
+          name: "adopt_participant",
+          arguments: { room: "test-room", name: "builder" },
+          _meta: fork,
+        }),
+      );
+      assert.deepEqual(
+        [adopted.status, adopted.room, adopted.name, adopted.client_id],
+        ["joined", "test-room", "Builder", first.client_id],
+      );
+      await until(() =>
+        a!.notices.some((notice) => notice.meta.event === "identity-adopted"),
+      );
+      assert.equal(
+        toolData(
+          await a.client.callTool({
+            name: "agentwire_status",
+            arguments: {},
+            _meta: original,
+          }),
+        ).status,
+        "ready",
+      );
+      assert.equal(f.store.client(helper.client_id), undefined);
+      await until(() => f.store.membership(first.client_id)?.active === true);
+      assert.deepEqual(
+        f.store
+          .participants("owner")
+          .map((participant) => participant.name)
+          .sort(),
+        ["Builder", "Owner", "Reviewer"],
+      );
+      const inbox = toolData(
+        await b.client.callTool({
+          name: "read_inbox",
+          arguments: {},
+          _meta: fork,
+        }),
+      );
+      assert.deepEqual(
+        inbox.messages.map((message: { body: string }) => message.body),
+        ["Waiting for whoever continues as Builder"],
+      );
+      // The original thread no longer resolves to the adopted identity.
+      assert.equal(
+        (
+          await a.client.callTool({
+            name: "read_inbox",
+            arguments: {},
+            _meta: original,
+          })
+        ).isError,
+        true,
+      );
+    } finally {
+      await a?.client.close();
+      await b?.client.close();
+      await f.stop();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 test("an unapproved plugin restarts with the same device code and keeps setup state outside its bundle", async () => {
   const f = await fixture();
   const directory = await mkdtemp(join(tmpdir(), "agentwire-plugin-restart-"));
@@ -563,7 +740,7 @@ test(
         { mode: 0o600 },
       );
       a = await plugin(directory);
-      assert.equal((await a.client.listTools()).tools.length, 8);
+      assert.equal((await a.client.listTools()).tools.length, 9);
       await until(() => contacted);
       assert.equal(
         toolData(

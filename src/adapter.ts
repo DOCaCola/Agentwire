@@ -59,6 +59,12 @@ try {
       process.exitCode = 1;
       void close();
     },
+    adopted: () => {
+      console.error(
+        "Another session adopted this Agentwire participant at the user's request; this adapter stops.",
+      );
+      void close();
+    },
   });
   process.stdin.once("end", () => {
     void close();

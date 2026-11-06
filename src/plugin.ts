@@ -10,6 +10,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { channelInstructions, createRelayConnection } from "./channel.js";
 import {
+  adoptParticipant,
   clientUrl,
   deviceCredential,
   requestEnrollment,
@@ -22,6 +23,8 @@ import {
 import {
   invalidArguments,
   joinSchema,
+  participantName,
+  roomName,
   toolCatalog,
   toolDefinitions,
 } from "./protocol.js";
@@ -38,6 +41,9 @@ const settingsSchema = z
   .object({ url: z.string().transform((value) => clientUrl(value).href) })
   .strict();
 const emptySchema = z.object({}).strict();
+const adoptSchema = z
+  .object({ room: roomName, name: participantName })
+  .strict();
 type Join = z.infer<typeof joinSchema>;
 const joinedSchema = z.object({ room: z.string(), name: z.string() });
 /**
@@ -96,9 +102,23 @@ const statusTool = {
     openWorldHint: false,
   },
 };
+const adoptTool = {
+  name: "adopt_participant",
+  description:
+    "Continue as an existing participant of a room in this thread: its room name, identity and waiting messages move here. Use only when the user explicitly asks this thread to take over that participant, for example after forking or handing off a thread. The thread that held it is told and leaves the room; a participant this thread held before is retired. Only agents on devices approved by the same person can be adopted.",
+  inputSchema: z.toJSONSchema(adoptSchema, { io: "input" }) as {
+    type: "object";
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    openWorldHint: false,
+  },
+};
 const schemas: Record<string, z.ZodType> = {
   setup_agentwire: setupSchema,
   agentwire_status: emptySchema,
+  adopt_participant: adoptSchema,
   ...Object.fromEntries(
     toolDefinitions.map((tool) => [tool.name, tool.schema]),
   ),
@@ -189,6 +209,11 @@ ${channelInstructions}`,
       ? { key: "codex-thread:" + meta.threadId, scope: "thread" }
       : { key: processSession, scope: "process" };
   }
+  const clientName = () =>
+    `${server.getClientVersion()?.name ?? "Agent"} · ${hostname()}`.slice(
+      0,
+      80,
+    );
   function membershipState(membership: { room: string; name: string }) {
     state = {
       status: "joined",
@@ -215,16 +240,29 @@ ${channelInstructions}`,
     const abort = AbortSignal.any([signal, active.signal]);
     const identity = await agentCredential(
       credential,
-      `${server.getClientVersion()?.name ?? "Agent"} · ${hostname()}`.slice(
-        0,
-        80,
-      ),
+      clientName(),
       abort,
       session.key,
       create,
     );
     active.signal.throwIfAborted();
     if (!identity.client) return;
+    await attach(
+      credential,
+      active,
+      abort,
+      { ...identity, client: identity.client },
+      session,
+    );
+  }
+  /** Opens the relay connection of an identity and resumes the room it belongs to. */
+  async function attach(
+    credential: DeviceCredential,
+    active: AbortController,
+    abort: AbortSignal,
+    identity: { token: string; client: { id: string; name: string } },
+    session: Session,
+  ) {
     const connected = createRelayConnection(server, {
       url: credential.url,
       token: identity.token,
@@ -234,6 +272,16 @@ ${channelInstructions}`,
         controlNotice(
           "connection-rejected",
           "Agentwire access was rejected. Call agentwire_status once; ask the user before re-enrolling this device.",
+        );
+      },
+      adopted: () => {
+        if (relay !== connected) return;
+        relay = undefined;
+        agent = undefined;
+        state = { status: "ready", url: credential.url };
+        controlNotice(
+          "identity-adopted",
+          "Another thread took over your Agentwire participant at the user's request. This thread is no longer in a room; join again only if the user asks.",
         );
       },
     });
@@ -249,6 +297,38 @@ ${channelInstructions}`,
     agent = { client: identity.client, session };
     relay = connected;
     if (membership) membershipState(membership);
+  }
+  async function adopt(
+    target: z.infer<typeof adoptSchema>,
+    session: Session,
+    signal: AbortSignal,
+  ) {
+    if (!approved || !attempt || !["ready", "joined"].includes(state.status))
+      return result(
+        {
+          ...state,
+          error: "Set up and approve this device before adopting a participant",
+        },
+        true,
+      );
+    const active = attempt;
+    const credential = approved;
+    const abort = AbortSignal.any([signal, active.signal]);
+    // This thread's own connection closes first; its identity is retired once the adoption succeeds.
+    relay?.stop();
+    relay = undefined;
+    agent = undefined;
+    state = { status: "ready", url: credential.url };
+    const identity = await adoptParticipant(
+      credential,
+      clientName(),
+      abort,
+      session.key,
+      target,
+    );
+    active.signal.throwIfAborted();
+    await attach(credential, active, abort, identity, session);
+    return result(state);
   }
   async function joinRoom(join: Join, session: Session, signal: AbortSignal) {
     if (["pending_approval", "connecting"].includes(state.status)) {
@@ -407,7 +487,7 @@ ${channelInstructions}`,
     })();
   };
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [setupTool, statusTool, ...toolCatalog],
+    tools: [setupTool, statusTool, ...toolCatalog, adoptTool],
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request, context) => {
     await settingsLoaded;
@@ -426,6 +506,10 @@ ${channelInstructions}`,
       if (name === "join_room") {
         const join = joinSchema.parse(args);
         return await exclusive(() => joinRoom(join, session, context.signal));
+      }
+      if (name === "adopt_participant") {
+        const target = adoptSchema.parse(args);
+        return await exclusive(() => adopt(target, session, context.signal));
       }
       await exclusive(() => identify(session, false, context.signal));
       if (name === "agentwire_status") {

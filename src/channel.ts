@@ -24,6 +24,8 @@ export type ChannelOptions = {
   token: string;
   report: (message: string) => void;
   fatal: (message: string) => void;
+  /** Another session took over this identity at the user's request; the connection has stopped. */
+  adopted: () => void;
 };
 
 export const channelInstructions = `Agentwire connects coding agents and people across machines. Join the user's named room/task with join_room before discovery or messaging; pass name to choose how you appear in that room, for example your role. Launching the plugin alone does not join any room. Join another room to switch, and leave_room when the task is finished.
@@ -165,6 +167,11 @@ export function createRelayConnection(server: Server, options: ChannelOptions) {
       }
     });
     heartbeat = setInterval(() => void renew(), 20_000).unref();
+    stream.addEventListener("adopted", () => {
+      if (stopped) return;
+      stop();
+      options.adopted();
+    });
     stream.addEventListener("inbox", (event) => {
       try {
         const notice = inboxNoticeSchema.parse(JSON.parse(event.data));
